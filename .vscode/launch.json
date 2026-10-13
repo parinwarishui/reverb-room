@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:stadiums-self-hosted}",
+      "name": "Debug SSH",
+      "target": "SSH",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug SSH"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:stadiums-self-hosted}",
+      "name": "Release SSH",
+      "target": "SSH",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release SSH"
+    }
+  ]
+}

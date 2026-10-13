@@ -1,0 +1,27 @@
+{
+  // Cmd+Shift+B runs the default build task.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SSH: build & run",
+      "type": "shell",
+      "command": "./build.sh",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "SSH: build, run & show logs",
+      "type": "shell",
+      "command": "./build.sh debug",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "SSH: compile only (check errors)",
+      "type": "shell",
+      "command": "swift build",
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}
