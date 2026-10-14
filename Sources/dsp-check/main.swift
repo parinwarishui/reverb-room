@@ -106,6 +106,79 @@ do {
     check(through < 0.5 * 0.01, String(format: "next room blocks 4 kHz by %.0f dB", 20 * log10(Double(through) / 0.5)))
 }
 
+// 2b. Limiter: holds the ceiling and doesn't pump on a sustained loud signal.
+print("Limiter")
+do {
+    let fs = 48_000.0
+    let processor = ReverbProcessor(sampleRate: fs, mix: 0, nextRoom: false)
+    let n = Int(3 * fs)
+    // A dense, loud "master": 60 Hz + 1 kHz, peaking ~5 dB over the ceiling.
+    var l = (0..<n).map { i -> Float in
+        let t = Double(i) / fs
+        return Float(0.9 * sin(2 * .pi * 60 * t) + 0.6 * sin(2 * .pi * 1000 * t))
+    }
+    var r = l
+    processor.process(left: &l, right: &r, frames: n)
+    let peak = l.map(abs).max() ?? 0
+    check(peak <= 0.892, String(format: "peaks held at -1 dBFS (%.2f dBFS)", 20 * log10(Double(peak))))
+    // After settling, the level of each 60 Hz cycle should be steady (no pumping).
+    let cycle = Int(fs / 60)
+    let peaks = stride(from: Int(1.5 * fs), to: n - cycle, by: cycle).map { start in
+        l[start..<(start + cycle)].map(abs).max() ?? 0
+    }
+    let swing = 20 * log10(Double((peaks.max() ?? 1) / (peaks.min() ?? 1)))
+    check(swing < 0.3, String(format: "steady level under sustained limiting (%.2f dB swing)", swing))
+}
+
+// 2c. Pitch shifter.
+print("Pitch shifter")
+do {
+    let fs = 48_000.0
+    func dominantFrequency(_ x: ArraySlice<Float>) -> Double {
+        var crossings = 0
+        var previous = x.first ?? 0
+        for v in x.dropFirst() {
+            if previous < 0 && v >= 0 { crossings += 1 }
+            previous = v
+        }
+        return Double(crossings) * fs / Double(x.count)
+    }
+    for semitones: Float in [-12, -2.8, 5] {
+        let shifter = PitchShifter(sampleRate: fs, semitones: semitones)
+        let n = Int(2 * fs)
+        var l = (0..<n).map { Float(0.5 * sin(2 * .pi * 440 * Double($0) / fs)) }, r = l
+        shifter.process(left: &l, right: &r, frames: n)
+        let expected = 440 * pow(2, Double(semitones) / 12)
+        let measured = dominantFrequency(l[n / 2..<n])
+        check(abs(measured - expected) / expected < 0.01,
+              String(format: "%+.1f st turns 440 Hz into %.1f Hz (expected %.1f)", semitones, measured, expected))
+    }
+
+    let bypass = PitchShifter(sampleRate: fs, semitones: 0)
+    let input = noise(8192, seed: 11)
+    var bl = input, br = input
+    bypass.process(left: &bl, right: &br, frames: bl.count)
+    check(bl == input && br == input, "0 semitones is bit-exact and adds no delay")
+    print("  info  shifted path latency \(bypass.latency) frames (\(Int(Double(bypass.latency) / fs * 1000)) ms)")
+
+    let busy = PitchShifter(sampleRate: fs, semitones: -2.8)
+    let cycle = 512
+    var cl = noise(cycle, seed: 12), cr = noise(cycle, seed: 13)
+    var worst = 0.0
+    let start = Date()
+    let cycles = Int(20 * fs) / cycle
+    for _ in 0..<cycles {
+        let t = Date()
+        busy.process(left: &cl, right: &cr, frames: cycle)
+        worst = max(worst, Date().timeIntervalSince(t))
+    }
+    let load = Date().timeIntervalSince(start) / 20 * 100
+    let budget = Double(cycle) / fs
+    print(String(format: "  info  pitch shifting uses %.1f%% of one core; slowest callback %.2f ms of %.1f ms",
+                 load, worst * 1000, budget * 1000))
+    check(worst < budget * 0.5, "every callback finishes in under half its time budget")
+}
+
 // 3. Impulse responses.
 print("Impulse responses")
 do {

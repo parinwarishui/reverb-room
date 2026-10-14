@@ -115,7 +115,6 @@ final class Model {
     @ObservationIgnored private var heardFrom: Set<String> = []
     @ObservationIgnored private var lastSignalCycles: UInt32 = 0
     @ObservationIgnored private var lastSignal = Date()
-    @ObservationIgnored private var lastUnderflows: UInt32 = 0
     @ObservationIgnored private var shapeWork: DispatchWorkItem?
     @ObservationIgnored private let audioQueue = DispatchQueue(label: "ReverbRoom.audio", qos: .userInitiated)
     @ObservationIgnored private let shapeQueue = DispatchQueue(label: "ReverbRoom.shape", qos: .userInitiated)
@@ -303,7 +302,6 @@ final class Model {
         retryAt = nil
         lastSignalCycles = 0
         lastSignal = Date()
-        lastUnderflows = 0
         status = .live(apps: apps, device: fresh.deviceName)
 
         // Catch up with anything the user changed while it was starting.
@@ -341,14 +339,6 @@ final class Model {
             status = .noSignal(apps: AudioApps.list(playing),
                                permission: AudioCapturePermission.status() != .authorized,
                                atmos: playing == [AudioApps.musicID])
-        }
-
-        if let fifo = pipeline.fifo {
-            let underflows = fifo.underflows.value
-            if underflows != lastUnderflows {
-                diag("pitch pulls ran dry \(underflows - lastUnderflows) time(s)")
-                lastUnderflows = underflows
-            }
         }
     }
 

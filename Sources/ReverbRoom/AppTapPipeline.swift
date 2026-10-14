@@ -7,7 +7,7 @@
 //    private aggregate device   [clock = your output device]
 //                      │  IOProc, real-time
 //                      ▼
-//    queue ─► AVAudioEngine (manual rendering): source ─► pitch shifter
+//    pitch shifter (Signalsmith Stretch; bypassed at 0 semitones)
 //                      │
 //                      ▼
 //    ReverbProcessor: convolution reverb, next-room filter, limiter
@@ -18,9 +18,9 @@
 //  One pipeline per start; teardown() destroys everything, which un-mutes the apps.
 //
 
-import AVFoundation
 import AudioToolbox
 import CoreAudio
+import Foundation
 import ReverbDSP
 
 enum PipelineError: LocalizedError {
@@ -29,7 +29,6 @@ enum PipelineError: LocalizedError {
     case unsupportedFormat
     case aggregateFailed(OSStatus)
     case aggregateNotReady
-    case engineFailed(String)
     case ioProcFailed(OSStatus)
     case startFailed(OSStatus)
 
@@ -40,7 +39,6 @@ enum PipelineError: LocalizedError {
         case .unsupportedFormat: return "The app's audio arrived in an unexpected format."
         case .aggregateFailed(let s): return "Couldn't connect to your speakers (error \(s))."
         case .aggregateNotReady: return "Your speakers didn't respond in time."
-        case .engineFailed(let detail): return "The pitch shifter failed: \(detail)."
         case .ioProcFailed(let s), .startFailed(let s): return "Couldn't start audio (error \(s))."
         }
     }
@@ -51,7 +49,6 @@ final class TapMeter {
     let peak = AtomicFloat(0)
     /// IO cycles in which the tap delivered anything but digital silence.
     let signalCycles = AtomicCounter()
-    let renderFailures = AtomicCounter()
 }
 
 /// Sendable by contract: start() and teardown() run only on the model's serial
@@ -61,15 +58,13 @@ final class AppTapPipeline: @unchecked Sendable {
 
     let meter = TapMeter()
     private(set) var processor: ReverbProcessor?
-    private(set) var fifo: StereoFIFO?
     private(set) var deviceName = ""
     private(set) var sampleRate: Double = 0
 
     private var tapID = AudioHW.unknown
     private var aggregateID = AudioHW.unknown
     private var procID: AudioDeviceIOProcID?
-    private var engine: AVAudioEngine?
-    private var pitch: AVAudioUnitTimePitch?
+    private var pitch: PitchShifter?
     private let ioQueue = DispatchQueue(label: "ReverbRoom.io", qos: .userInteractive)
     private let listenerQueue = DispatchQueue(label: "ReverbRoom.listeners")
     private var listeners: [(object: AudioObjectID, address: AudioObjectPropertyAddress,
@@ -147,7 +142,11 @@ final class AppTapPipeline: @unchecked Sendable {
         self.processor = processor
 
         // 4. Pitch shifter.
-        let context = try buildEngine(settings: settings, processor: processor)
+        let pitch = PitchShifter(sampleRate: sampleRate, semitones: Float(settings.pitch),
+                                 maxFrames: Self.maxFrames)
+        self.pitch = pitch
+        diag("Pitch shifter latency: \(pitch.latency) frames")
+        let context = IOContext(maxFrames: Self.maxFrames, pitch: pitch, processor: processor, meter: meter)
 
         // 5. The real-time callback.
         var newProc: AudioDeviceIOProcID?
@@ -166,10 +165,9 @@ final class AppTapPipeline: @unchecked Sendable {
         diag("Pipeline running")
     }
 
-    /// Semitones; 0 bypasses the shifter so it adds no artifacts.
+    /// Semitones; 0 bypasses the shifter so it adds no artifacts or delay.
     func setPitch(_ semitones: Double) {
-        pitch?.pitch = Float(semitones * 100)
-        pitch?.bypass = abs(semitones) < 0.05
+        pitch?.setSemitones(Float(semitones))
     }
 
     /// Builds a new impulse response and hands it to the audio thread. Slow; call
@@ -198,59 +196,7 @@ final class AppTapPipeline: @unchecked Sendable {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = AudioHW.unknown
         }
-        engine?.stop()
-        engine = nil
         pitch = nil
-    }
-
-    // MARK: Engine
-
-    private func buildEngine(settings: ReverbSettings, processor: ReverbProcessor) throws -> IOContext {
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
-            throw PipelineError.engineFailed("no stereo format at \(sampleRate) Hz")
-        }
-        let engine = AVAudioEngine()
-        do {
-            try engine.enableManualRenderingMode(.realtime, format: format,
-                                                 maximumFrameCount: AVAudioFrameCount(Self.maxFrames))
-        } catch {
-            throw PipelineError.engineFailed(error.localizedDescription)
-        }
-
-        // The pitch shifter pulls input in its own chunk sizes; this cushion covers it.
-        let fifo = StereoFIFO(capacity: 32_768, prefill: 2_048)
-        let source = AVAudioSourceNode(format: format) { _, _, frameCount, bufferList -> OSStatus in
-            let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
-            guard buffers.count >= 2,
-                  let left = buffers[0].mData?.assumingMemoryBound(to: Float.self),
-                  let right = buffers[1].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
-            fifo.pop(left, right, frames: Int(frameCount))
-            return noErr
-        }
-
-        // More overlapping analysis windows than the default 8: smoother, less
-        // "phasey" pitch shifting for a little more CPU.
-        let pitch = AVAudioUnitTimePitch()
-        pitch.overlap = 16
-        pitch.pitch = Float(settings.pitch * 100)
-        pitch.bypass = abs(settings.pitch) < 0.05
-
-        engine.attach(source)
-        engine.attach(pitch)
-        engine.connect(source, to: pitch, format: format)
-        engine.connect(pitch, to: engine.mainMixerNode, format: format)
-        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: format)
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            throw PipelineError.engineFailed(error.localizedDescription)
-        }
-
-        self.engine = engine
-        self.pitch = pitch
-        self.fifo = fifo
-        return IOContext(engine: engine, maxFrames: Self.maxFrames, fifo: fifo, processor: processor, meter: meter)
     }
 
     // MARK: Device
@@ -315,27 +261,27 @@ final class AppTapPipeline: @unchecked Sendable {
 
 /// Everything the IOProc touches. Holds no reference back to the pipeline.
 private final class IOContext {
-    private let render: AVAudioEngineManualRenderingBlock
-    private let renderBuffer: AVAudioPCMBuffer      // owns the memory below
-    private let renderList: UnsafeMutablePointer<AudioBufferList>
     private let left: UnsafeMutablePointer<Float>
     private let right: UnsafeMutablePointer<Float>
     private let maxFrames: Int
-    private let fifo: StereoFIFO
+    private let pitch: PitchShifter
     private let processor: ReverbProcessor
     private let meter: TapMeter
 
-    init(engine: AVAudioEngine, maxFrames: Int, fifo: StereoFIFO, processor: ReverbProcessor, meter: TapMeter) {
-        render = engine.manualRenderingBlock
-        renderBuffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat,
-                                        frameCapacity: AVAudioFrameCount(maxFrames))!
-        renderList = renderBuffer.mutableAudioBufferList
-        left = renderBuffer.floatChannelData![0]
-        right = renderBuffer.floatChannelData![1]
+    init(maxFrames: Int, pitch: PitchShifter, processor: ReverbProcessor, meter: TapMeter) {
+        left = .allocate(capacity: maxFrames)
+        right = .allocate(capacity: maxFrames)
+        left.initialize(repeating: 0, count: maxFrames)
+        right.initialize(repeating: 0, count: maxFrames)
         self.maxFrames = maxFrames
-        self.fifo = fifo
+        self.pitch = pitch
         self.processor = processor
         self.meter = meter
+    }
+
+    deinit {
+        left.deallocate()
+        right.deallocate()
     }
 
     /// Where one output channel lives inside the device's buffers.
@@ -368,48 +314,40 @@ private final class IOContext {
         for buffer in outs {
             if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) }
         }
+        guard let outLeft = Self.channel(0, in: outs) else { return }
+        let outRight = Self.channel(1, in: outs)
+        let outFrames = min(outLeft.frames, outRight?.frames ?? outLeft.frames)
 
         // The tap is the last input stream; any before it are the device's own inputs.
         let ins = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+        var samples: UnsafeMutablePointer<Float>?
+        var channels = 1
+        var inFrames = 0
         if let tap = ins.last, let data = tap.mData, tap.mNumberChannels > 0 {
-            let channels = Int(tap.mNumberChannels)
-            let samples = data.assumingMemoryBound(to: Float.self)
-            let frames = Int(tap.mDataByteSize) / (MemoryLayout<Float>.size * channels)
-            var peak: Float = 0
-            for i in 0..<(frames * channels) { peak = max(peak, abs(samples[i])) }
-            meter.peak.value = peak
-            if peak > 0 { meter.signalCycles.increment() }
-            fifo.push(interleaved: samples, channels: channels, frames: frames)
+            channels = Int(tap.mNumberChannels)
+            samples = data.assumingMemoryBound(to: Float.self)
+            inFrames = Int(tap.mDataByteSize) / (MemoryLayout<Float>.size * channels)
         }
 
-        guard let outLeft = Self.channel(0, in: outs) else { return }
-        let outRight = Self.channel(1, in: outs)
-        let frames = min(outLeft.frames, outRight?.frames ?? outLeft.frames)
-        let rendered = UnsafeMutableAudioBufferListPointer(renderList)
-
+        var peak: Float = 0
         var done = 0
-        while done < frames {
-            let n = min(frames - done, maxFrames)
-            let bytes = UInt32(n * MemoryLayout<Float>.size)
-            if rendered.count >= 2 {
-                rendered[0].mData = UnsafeMutableRawPointer(left)
-                rendered[0].mDataByteSize = bytes
-                rendered[1].mData = UnsafeMutableRawPointer(right)
-                rendered[1].mDataByteSize = bytes
-            }
-            var error: OSStatus = noErr
-            let status = render(AVAudioFrameCount(n), renderList, &error)
-            if status == .success, rendered.count >= 2,
-               let l = rendered[0].mData?.assumingMemoryBound(to: Float.self),
-               let r = rendered[1].mData?.assumingMemoryBound(to: Float.self) {
-                if l != left { left.update(from: l, count: n) }
-                if r != right { right.update(from: r, count: n) }
-            } else {
-                // The apps are muted, so never go silent: skip the pitch shifter instead.
-                meter.renderFailures.increment()
-                fifo.pop(left, right, frames: n)
+        while done < outFrames {
+            let n = min(outFrames - done, maxFrames)
+            // Deinterleave the tap (silence if it delivered fewer frames than asked).
+            for f in 0..<n {
+                let frame = done + f
+                if let samples, frame < inFrames {
+                    let s = samples + frame * channels
+                    left[f] = s[0]
+                    right[f] = channels > 1 ? s[1] : s[0]
+                    peak = max(peak, abs(left[f]), abs(right[f]))
+                } else {
+                    left[f] = 0
+                    right[f] = 0
+                }
             }
 
+            pitch.process(left: left, right: right, frames: n)
             processor.process(left: left, right: right, frames: n)
 
             for f in 0..<n {
@@ -423,5 +361,7 @@ private final class IOContext {
             }
             done += n
         }
+        meter.peak.value = peak
+        if peak > 0 { meter.signalCycles.increment() }
     }
 }

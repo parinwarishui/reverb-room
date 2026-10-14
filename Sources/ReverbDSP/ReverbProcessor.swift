@@ -6,12 +6,16 @@
 //        └─ crossfeed ─ convolution ─── wet gain ─┴─► next-room wall ─► limiter ─► out
 //
 //  Audio moves in blocks of B samples, so the output is B samples late (21 ms at
-//  48 kHz), plus 1.5 ms of limiter lookahead. Dry and wet are delayed together,
+//  48 kHz), plus 5 ms of limiter lookahead. Dry and wet are delayed together,
 //  so the pre-delay stays exact.
 //
-//  Gain staging: an equal-power dry/wet mix keeps loudness steady as the amount
-//  changes, and a lookahead limiter holds peaks at -1 dBFS (the streaming true-peak
-//  target) by turning the gain down smoothly just before a peak, not by clipping it.
+//  Gain staging, so loud masters stay clean:
+//  - An equal-power dry/wet mix keeps loudness steady as the amount changes.
+//  - The reverb ducks by up to 5 dB under loud passages and blooms back in the
+//    gaps (sidechain ducking), so it doesn't pile on top of an already-full mix.
+//  - A lookahead limiter holds peaks at -1 dBFS (the streaming true-peak target)
+//    with a smooth gain curve and program-dependent release, instead of clipping
+//    or pumping.
 //
 //  Control methods (setMix, setNextRoom, submit, collectGarbage) are safe from any
 //  thread. process() is real-time safe: no locks, no allocation, and nothing
@@ -49,6 +53,14 @@ public final class ReverbProcessor {
     private static let wallMakeup: Float = 1.35
 
     private let limiter: LookaheadLimiter
+
+    // Reverb ducking: follows the dry level and turns the wet down under loud parts.
+    private var duckEnvelope: Float = 0
+    private let duckAttack: Float
+    private let duckRelease: Float
+    private static let duckFloor: Float = 0.1         // -20 dBFS: no ducking below this
+    private static let duckSpan: Float = 0.6          // full ducking from -3 dBFS up
+    private static let duckDepth: Float = 0.45        // ≈ -5 dB at most
 
     // Impulse-response handoff. `submit` parks a retained response in `pending`; the
     // audio thread adopts it, crossfades over one block and parks the old one in
@@ -94,7 +106,9 @@ public final class ReverbProcessor {
         wallLeft.initialize(from: wall, count: Self.wallStages)
         wallRight.initialize(from: wall, count: Self.wallStages)
 
-        limiter = LookaheadLimiter(sampleRate: sampleRate, ceilingDB: -1, lookahead: 0.0015, release: 0.15)
+        limiter = LookaheadLimiter(sampleRate: sampleRate, ceilingDB: -1, lookahead: 0.005)
+        duckAttack = Float(1 - exp(-1 / (0.01 * sampleRate)))
+        duckRelease = Float(1 - exp(-1 / (0.35 * sampleRate)))
     }
 
     deinit {
@@ -217,8 +231,13 @@ public final class ReverbProcessor {
             wetGain += wetStep
             muffle += muffleStep
 
-            var l = inLeft[i] * dryGain + wetLeft[i] * wetGain
-            var r = inRight[i] * dryGain + wetRight[i] * wetGain
+            let level = max(abs(inLeft[i]), abs(inRight[i]))
+            duckEnvelope += (level - duckEnvelope) * (level > duckEnvelope ? duckAttack : duckRelease)
+            let loudness = min(max((duckEnvelope - Self.duckFloor) / Self.duckSpan, 0), 1)
+            let wet = wetGain * (1 - Self.duckDepth * loudness)
+
+            var l = inLeft[i] * dryGain + wetLeft[i] * wet
+            var r = inRight[i] * dryGain + wetRight[i] * wet
 
             var wallL = l, wallR = r
             for f in 0..<Self.wallStages {
@@ -244,38 +263,51 @@ public final class ReverbProcessor {
     private static func wet(_ amount: Float) -> Float { sin(amount * .pi / 2) }
 }
 
-/// Stereo-linked lookahead peak limiter. Each sample is delayed by `delay` frames
-/// while the gain glides down to what the loudest upcoming sample needs, so peaks
-/// are caught without the distortion of an instant gain change. A final hard clip
-/// at full scale is only a safety net.
+/// Stereo-linked lookahead peak limiter, built so it never distorts and never
+/// pumps on dense, loud masters:
+///
+/// - Gain computer: the gain each sample needs to stay under the ceiling.
+/// - Hold the lowest of those over the lookahead window, then average over the
+///   same window. The gain curve is smooth (a linear ramp, no corners), and it
+///   reaches the full reduction exactly when the peak leaves the delay line, so
+///   peaks are always caught.
+/// - Program-dependent release: brief peaks recover in 60 ms; sustained limiting
+///   (a loud chorus) recovers over 600 ms, so the level doesn't swell and duck.
 final class LookaheadLimiter {
+    /// Audio delay, in frames.
     let delay: Int
+    private let window: Int
     private let ceiling: Float
-    private let attack: Float
-    private let release: Float
-    private var gain: Float = 1
+    private let fastRelease: Float
+    private let slowRelease: Float
+    private let reductionSmoothing: Float
 
-    private let delayLeft, delayRight, required: UnsafeMutablePointer<Float>
+    private let delayLeft, delayRight, required, held: UnsafeMutablePointer<Float>
     private var index = 0
+    private var heldSum: Float
+    private var gain: Float = 1
+    /// Smoothed amount of gain reduction, 0...1, to pick the release speed.
+    private var recentReduction: Float = 0
 
-    init(sampleRate: Double, ceilingDB: Double, lookahead: Double, release releaseTime: Double) {
-        delay = max(1, Int(lookahead * sampleRate))
+    init(sampleRate: Double, ceilingDB: Double, lookahead: Double) {
+        let size = max(2, Int(lookahead * sampleRate))
+        window = size
+        delay = size - 1
         ceiling = Float(pow(10, ceilingDB / 20))
-        // Reaches 99% of the needed reduction within the lookahead window.
-        attack = Float(1 - exp(-5 / Double(delay)))
-        release = Float(1 - exp(-1 / (releaseTime * sampleRate)))
-        delayLeft = .allocate(capacity: delay)
-        delayRight = .allocate(capacity: delay)
-        required = .allocate(capacity: delay)
-        delayLeft.initialize(repeating: 0, count: delay)
-        delayRight.initialize(repeating: 0, count: delay)
-        required.initialize(repeating: 1, count: delay)
+        fastRelease = Float(1 - exp(-1 / (0.06 * sampleRate)))
+        slowRelease = Float(1 - exp(-1 / (0.6 * sampleRate)))
+        reductionSmoothing = Float(1 - exp(-1 / (0.3 * sampleRate)))
+        func ring(_ value: Float) -> UnsafeMutablePointer<Float> {
+            let p = UnsafeMutablePointer<Float>.allocate(capacity: size)
+            p.initialize(repeating: value, count: size)
+            return p
+        }
+        delayLeft = ring(0); delayRight = ring(0); required = ring(1); held = ring(1)
+        heldSum = Float(size)
     }
 
     deinit {
-        delayLeft.deallocate()
-        delayRight.deallocate()
-        required.deallocate()
+        for p in [delayLeft, delayRight, required, held] { p.deallocate() }
     }
 
     @inline(__always)
@@ -283,18 +315,31 @@ final class LookaheadLimiter {
         let peak = max(abs(l), abs(r))
         required[index] = peak > ceiling ? ceiling / peak : 1
 
-        var target: Float = 1
-        for k in 0..<delay { target = min(target, required[k]) }
-        gain += (target - gain) * (target < gain ? attack : release)
+        var lowest: Float = 1
+        for k in 0..<window { lowest = min(lowest, required[k]) }
+        heldSum += lowest - held[index]
+        held[index] = lowest
+        let smooth = heldSum / Float(window)
 
-        let outL = delayLeft[index] * gain
-        let outR = delayRight[index] * gain
+        if smooth < gain {
+            gain = smooth
+        } else {
+            let sustained = min(recentReduction * 12, 1)       // ~1 dB of average reduction → slow
+            gain += (smooth - gain) * (fastRelease + (slowRelease - fastRelease) * sustained)
+        }
+        recentReduction += ((1 - gain) - recentReduction) * reductionSmoothing
+
         delayLeft[index] = l
         delayRight[index] = r
         index += 1
-        if index == delay { index = 0 }
-
-        l = min(max(outL, -1), 1)
-        r = min(max(outR, -1), 1)
+        if index == window {
+            index = 0
+            // Re-sum now and then so rounding can't drift.
+            heldSum = 0
+            for k in 0..<window { heldSum += held[k] }
+        }
+        // The oldest sample in the ring, written `delay` samples ago.
+        l = min(max(delayLeft[index] * gain, -1), 1)
+        r = min(max(delayRight[index] * gain, -1), 1)
     }
 }

@@ -60,17 +60,25 @@ apps ─► process tap ─► pitch shifter ─┬─────────�
   so loudness stays even as you add reverb.
 - **Next room.** A 24 dB/octave lowpass at 380 Hz with a small low-end resonance
   and make-up gain: the bass thumps through the wall and the rest is gone.
+- **Reverb ducking.** The reverb dips by up to 5 dB under loud passages and
+  blooms back in the gaps, so it never piles on top of an already-full master.
 - **Lookahead limiter.** Peaks are held at -1 dBFS (the streaming true-peak
-  target) by easing the gain down 1.5 ms ahead of them, rather than clipping.
-- **Pitch.** Apple's time-pitch unit with 16× overlap for a smoother shift.
-  The app keeps the song's speed; lower the pitch for the slowed sound. At 0 it's
-  bypassed entirely.
+  target). The gain is the minimum the next 5 ms needs, averaged over the same
+  5 ms, so it's a smooth ramp that's guaranteed to catch every peak without
+  distorting it. Release is program-dependent: 60 ms after a lone peak, 600 ms
+  when a whole loud section is being limited, so loud songs don't pump.
+- **Pitch.** [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch),
+  a polyphonic pitch shifter built for music, replaces Apple's phase vocoder,
+  which made vocals sound watery and smeared drums. The app keeps the song's
+  speed; lower the pitch for the slowed sound. At 0 the shifter is bypassed
+  bit-for-bit with no added delay; moving in or out of 0 crossfades over 60 ms.
 - **Smooth changes.** Slider moves ramp over one block and room changes crossfade,
   so nothing clicks.
 
-Total added latency is about 65 ms at 48 kHz (pitch-shifter cushion, one 1024-
-sample convolution block, limiter lookahead), which only matters if you're
-watching a music video.
+Added latency at 48 kHz is about 26 ms with the pitch at 0 (one 1024-sample
+convolution block plus limiter lookahead), and about 175 ms when the pitch is
+shifted (the shifter's 150 ms analysis window). That only matters while watching
+video, so keep the pitch at 0 for YouTube.
 
 ## Troubleshooting
 
@@ -89,9 +97,10 @@ un-mutes the apps first.
 
 ```
 Sources/RRAtomics/     C11 atomics shared with the audio thread
-Sources/ReverbDSP/     Impulse-response generator, FFT convolver, processor, limiter, filters
+Sources/RRStretch/     C wrapper around Signalsmith Stretch (vendored, MIT, in vendor/)
+Sources/ReverbDSP/     Impulse-response generator, FFT convolver, pitch shifter, processor, limiter, filters
 Sources/ReverbRoom/    The app: app discovery, tap and pipeline, model, SwiftUI window, menu bar
-Sources/dsp-check/     Self-check: convolution accuracy, latency, limiter, stereo, CPU
+Sources/dsp-check/     Self-check: convolution accuracy, latency, limiter, pitch, stereo, CPU
 ```
 
 It uses two private, read-only calls: `TCCAccessPreflight`, to tell a missing
@@ -99,3 +108,9 @@ permission apart from a Dolby Atmos song, and
 `responsibility_get_pid_responsible_for_pid`, to trace Safari's WebKit audio
 process back to Safari. That's fine for a personal app, but the App Store wouldn't
 accept it.
+
+## Third-party code
+
+`Sources/RRStretch/vendor/` contains [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch)
+and [Signalsmith Linear](https://github.com/Signalsmith-Audio/linear), both MIT-licensed
+by Signalsmith Audio and included unmodified with their licenses.
