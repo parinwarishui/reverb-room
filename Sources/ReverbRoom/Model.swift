@@ -73,9 +73,29 @@ final class Model {
         }
     }
 
-    var settings = ReverbSettings.load() {
+    /// The user's own settings: the preset they picked and sliders they moved. Saved.
+    var base = ReverbSettings.load() {
+        didSet {
+            base.save()
+            updateEffective()
+        }
+    }
+    /// What's playing: `base`, fine-tuned to the song while adapting.
+    private(set) var settings = ReverbSettings.load() {
         didSet { settingsChanged(from: oldValue) }
     }
+    /// "Adapt to the song": tune amount, size, pre-delay and tone to what's playing.
+    var adaptive = UserDefaults.standard.object(forKey: "adaptive") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(adaptive, forKey: "adaptive")
+            if !adaptive { tune = AutoTune() }
+            updateEffective()
+        }
+    }
+    /// The current offsets from `base`, eased toward what the song suggests.
+    private(set) var tune = AutoTune()
+    /// What the analyzer hears; nil until it has a few seconds of the song.
+    private(set) var song: SongFeatures?
     /// Bundle IDs of the apps that get reverb.
     private(set) var sources: Set<String> = Model.loadSources()
     /// Apps shown in the picker: selected ones, ones that have played sound this
@@ -87,7 +107,7 @@ final class Model {
     private(set) var level: Float = 0
 
     var selectedPreset: Preset? {
-        Preset.allCases.first { $0.settings.matches(settings) }
+        Preset.allCases.first { $0.settings.matches(base) }
     }
 
     /// "FOR APPLE MUSIC", "FOR SPOTIFY + APPLE MUSIC", "FOR 3 APPS".
@@ -159,10 +179,87 @@ final class Model {
         stopPipeline()
         level = 0
         status = .off
+        analysisFrames = []
+        song = nil
+        tune = AutoTune()
+        updateEffective()
     }
 
     func apply(_ preset: Preset) {
-        settings = preset.settings
+        base = preset.settings
+    }
+
+    enum Field { case amount, size, preDelay, tone, pitch }
+
+    /// A slider moved. While adapting, the value the user sees includes the song's
+    /// offset, so the offset is taken back out to find their new base value.
+    func set(_ field: Field, to value: Double) {
+        var new = base
+        let adapting = adaptive
+        switch field {
+        case .amount: new.amount = (adapting ? value - tune.amount : value).clamped(to: ReverbSettings.amountRange)
+        case .size: new.size = (adapting ? value / tune.size : value).clamped(to: ReverbSettings.sizeRange)
+        case .preDelay: new.preDelay = value.clamped(to: ReverbSettings.preDelayRange)
+        case .tone: new.tone = (adapting ? value - tune.tone : value).clamped(to: ReverbSettings.toneRange)
+        case .pitch: new.pitch = value.clamped(to: ReverbSettings.pitchRange)
+        }
+        base = new
+    }
+
+    /// Whether the song is currently moving this slider away from the user's value.
+    func isTuned(_ field: Field) -> Bool {
+        guard adaptive else { return false }
+        switch field {
+        case .amount: return abs(settings.amount - base.amount) >= 0.01
+        case .size: return abs(settings.size - base.size) >= 0.1
+        case .preDelay: return abs(settings.preDelay - base.preDelay) >= 1
+        case .tone: return abs(settings.tone - base.tone) >= 0.01
+        case .pitch: return false
+        }
+    }
+
+    /// One line describing what the analyzer hears.
+    var songSummary: String? {
+        guard adaptive, isOn else { return nil }
+        guard let song else {
+            if case .live = status { return "Listening to the song…" }
+            return nil
+        }
+        var parts: [String] = []
+        if let bpm = song.tempo { parts.append("≈\(Int(bpm.rounded())) BPM") }
+        parts.append(song.onsetRate < 2.5 ? "sparse" : song.onsetRate < 4.5 ? "steady" : "busy")
+        if song.crest < 8 { parts.append("loud master") }
+        if song.brightness > 0.12 { parts.append("bright mix") } else if song.brightness < 0.04 { parts.append("warm mix") }
+        return "Hearing " + parts.joined(separator: ", ")
+    }
+
+    private func updateEffective() {
+        var effective = base
+        if adaptive {
+            func snap(_ v: Double, _ step: Double) -> Double { (v / step).rounded() * step }
+            effective.amount = snap((base.amount + tune.amount).clamped(to: ReverbSettings.amountRange), 0.01)
+            effective.size = snap((base.size * tune.size).clamped(to: ReverbSettings.sizeRange), 0.1)
+            effective.tone = snap((base.tone + tune.tone).clamped(to: ReverbSettings.toneRange), 0.01)
+            effective.preDelay = snap(tune.syncedPreDelay(near: base.preDelay)
+                .clamped(to: ReverbSettings.preDelayRange), 1)
+        }
+        if effective != settings { settings = effective }
+    }
+
+    /// Feeds the last few seconds of the song to the analyzer and eases the offsets
+    /// toward its suggestion (about a third of the way per second).
+    @ObservationIgnored private var analysisFrames: [AnalysisFrame] = []
+
+    private func adapt() {
+        guard let analyzer = pipeline?.analyzer else { return }
+        analyzer.drain(into: &analysisFrames)
+        let keep = 10 * SongAnalyzer.framesPerSecond
+        if analysisFrames.count > keep { analysisFrames.removeFirst(analysisFrames.count - keep) }
+        guard adaptive,
+              let features = SongFeatures.analyze(analysisFrames.suffix(8 * SongAnalyzer.framesPerSecond)[...]) else { return }
+        if features != song { song = features }
+        tune.approach(AutoTune.target(for: features), by: 0.18)
+        updateEffective()
     }
 
     /// Selects or deselects an app. Takes effect within half a second while on.
@@ -260,6 +357,7 @@ final class Model {
         }
         let playing = selected.filter { apps[$0]?.playing == true }
         checkHealth(playing: playing, apps: AudioApps.list(withAudio))
+        adapt()
     }
 
     private func startPipeline(_ objects: [AudioObjectID], apps: String) {
@@ -350,7 +448,6 @@ final class Model {
     // MARK: Settings
 
     private func settingsChanged(from old: ReverbSettings) {
-        settings.save()
         guard let pipeline else { return }
         push(settings, from: old, to: pipeline)
     }

@@ -17,8 +17,10 @@ struct ContentView: View {
                 .padding(.top, 18)
             presets
                 .padding(.top, 20)
+            adaptRow
+                .padding(.top, 20)
             sliders
-                .padding(.top, 18)
+                .padding(.top, 16)
             nextRoom
                 .padding(.top, 22)
             Text("Apps keep the song's speed. Lower the pitch to get the slowed sound.")
@@ -68,24 +70,56 @@ struct ContentView: View {
         VStack(spacing: 10) {
             SettingSlider(title: "Reverb amount",
                           value: "\(Int((model.settings.amount * 100).rounded()))%",
-                          number: $model.settings.amount.rounded(to: 0.01),
-                          range: ReverbSettings.amountRange)
+                          number: binding(.amount, \.amount, step: 0.01),
+                          range: ReverbSettings.amountRange, tuned: model.isTuned(.amount))
             SettingSlider(title: "Room size",
                           value: String(format: "%.1f s", model.settings.size),
-                          number: $model.settings.size.rounded(to: 0.1),
-                          range: ReverbSettings.sizeRange)
+                          number: binding(.size, \.size, step: 0.1),
+                          range: ReverbSettings.sizeRange, tuned: model.isTuned(.size))
             SettingSlider(title: "Pre-delay",
                           value: "\(Int(model.settings.preDelay.rounded())) ms",
-                          number: $model.settings.preDelay.rounded(to: 1),
-                          range: ReverbSettings.preDelayRange)
+                          number: binding(.preDelay, \.preDelay, step: 1),
+                          range: ReverbSettings.preDelayRange, tuned: model.isTuned(.preDelay))
             SettingSlider(title: "Tone",
                           value: model.settings.toneName,
-                          number: $model.settings.tone.rounded(to: 0.01),
-                          range: ReverbSettings.toneRange)
+                          number: binding(.tone, \.tone, step: 0.01),
+                          range: ReverbSettings.toneRange, tuned: model.isTuned(.tone))
             SettingSlider(title: "Pitch",
                           value: pitchLabel,
-                          number: $model.settings.pitch.rounded(to: 0.1),
-                          range: ReverbSettings.pitchRange)
+                          number: binding(.pitch, \.pitch, step: 0.1),
+                          range: ReverbSettings.pitchRange, tuned: false)
+        }
+    }
+
+    /// Shows the value that's playing; writes go to the user's own settings.
+    private func binding(_ field: Model.Field, _ keyPath: KeyPath<ReverbSettings, Double>,
+                         step: Double) -> Binding<Double> {
+        Binding(get: { model.settings[keyPath: keyPath] },
+                set: { model.set(field, to: ($0 / step).rounded() * step) })
+    }
+
+    private var adaptRow: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(Color(red: 0.95, green: 0.6, blue: 0.9))
+                    Text("Adapt to the song")
+                }
+                .font(.system(size: 15.5, weight: .semibold))
+                Text(model.songSummary ?? "Tunes amount, room size, pre-delay and tone to each song")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.opacity)
+                    .animation(.easeOut(duration: 0.3), value: model.songSummary)
+            }
+            .layoutPriority(1)
+            Spacer(minLength: 8)
+            Toggle("Adapt to the song", isOn: $model.adaptive)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(Color(red: 0.62, green: 0.38, blue: 0.86))
         }
     }
 
@@ -107,7 +141,7 @@ struct ContentView: View {
             }
             .layoutPriority(1)
             Spacer(minLength: 8)
-            Toggle("Next room", isOn: $model.settings.nextRoom)
+            Toggle("Next room", isOn: $model.base.nextRoom)
                 .toggleStyle(.switch)
                 .labelsHidden()
                 .tint(Color(red: 0.62, green: 0.38, blue: 0.86))
@@ -361,6 +395,8 @@ struct SettingSlider: View {
     let value: String
     @Binding var number: Double
     let range: ClosedRange<Double>
+    /// The song is moving this one.
+    let tuned: Bool
 
     var body: some View {
         VStack(spacing: 3) {
@@ -368,15 +404,27 @@ struct SettingSlider: View {
                 Text(title)
                     .font(.system(size: 15.5, weight: .semibold))
                 Spacer()
-                Text(value)
-                    .font(.system(size: 14, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.65))
+                HStack(spacing: 4) {
+                    if tuned {
+                        Image(systemName: "sparkle")
+                            .font(.system(size: 10, weight: .bold))
+                            .transition(.opacity)
+                    }
+                    Text(value)
+                        .font(.system(size: 14, design: .monospaced))
+                        .contentTransition(.numericText())
+                }
+                .foregroundStyle(tuned ? Color(red: 0.95, green: 0.6, blue: 0.9) : .white.opacity(0.65))
+                .animation(.easeOut(duration: 0.4), value: value)
+                .animation(.easeOut(duration: 0.25), value: tuned)
+                .help(tuned ? "Tuned to the song" : "")
             }
             Slider(value: $number, in: range)
                 .tint(.white)
                 .labelsHidden()
                 .accessibilityLabel(title)
-                .accessibilityValue(value)
+                .accessibilityValue(tuned ? "\(value), tuned to the song" : value)
+                .animation(.easeInOut(duration: 0.6), value: number)
         }
     }
 }

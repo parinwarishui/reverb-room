@@ -38,6 +38,27 @@ To keep that permission across rebuilds, create a code-signing certificate named
 Certificate…, Self Signed Root, Code Signing). `build.sh` signs with it when it's
 there and falls back to ad-hoc signing when it isn't.
 
+## Adapt to the song
+
+With **Adapt to the song** on (the default), Reverb Room listens to whatever is
+playing and fine-tunes the sliders around the room you picked. Sliders the song
+is moving show their value in pink with a ✦; your own setting stays underneath,
+and dragging a slider sets a new centre for it.
+
+Every 10 ms the audio thread sums the energy below 200 Hz, 200 Hz–4 kHz and above
+4 kHz, plus the peak, and queues it lock-free. Twice a second, off the audio
+thread, the last 8 seconds are analysed:
+
+| It hears | How | It changes |
+| --- | --- | --- |
+| Tempo | Autocorrelation of band-wise spectral flux, 60–180 BPM, weighted toward 120 BPM to avoid octave errors | Pre-delay snaps to the nearest 1/128, 1/64, 1/32 or 1/16 note; slower songs get longer rooms |
+| Density | Onsets per second (peaks of the onset strength above a median-based threshold) | Busy songs get less reverb and a shorter room, so it doesn't turn to mush |
+| Dynamics | Crest factor (peak over RMS), median per second | Squashed, loud masters get less reverb |
+| Brightness | Share of energy above 4 kHz (and below 200 Hz) | Bright, harsh mixes get a darker tail; dull ones a brighter tail |
+
+The changes are bounded (amount −18 % to +12 %, room size ×0.6 to ×1.5, tone
+±0.25) and eased in over a few seconds. Pitch and Next room are never changed.
+
 ## How it sounds the way it does
 
 ```
@@ -111,9 +132,9 @@ un-mutes the apps first.
 ```
 Sources/RRAtomics/     C11 atomics shared with the audio thread
 Sources/RRStretch/     C wrapper around Signalsmith Stretch (vendored, MIT, in vendor/)
-Sources/ReverbDSP/     Impulse-response generator, FFT convolver, pitch shifter, processor, limiter, filters
+Sources/ReverbDSP/     Impulse-response generator, FFT convolver, pitch shifter, processor, limiter, filters, song analyzer
 Sources/ReverbRoom/    The app: app discovery, tap and pipeline, model, SwiftUI window, menu bar
-Sources/dsp-check/     Self-check: convolution, latency, limiter, BS.1770 conformance, pitch, send, CPU
+Sources/dsp-check/     Self-check: convolution, latency, limiter, BS.1770 conformance, pitch, send, song analysis, CPU
 ```
 
 It uses two private, read-only calls: `TCCAccessPreflight`, to tell a missing

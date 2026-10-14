@@ -279,6 +279,77 @@ do {
     check(softened > 1.5, String(format: "drum-like hits into the reverb softened by %.1f dB", softened))
 }
 
+// 2f. Song analysis.
+print("Song analysis")
+do {
+    let fs = 48_000.0
+    func analyze(_ signal: [Float]) -> SongFeatures? {
+        let analyzer = SongAnalyzer(sampleRate: fs)
+        var frames: [AnalysisFrame] = []
+        signal.withUnsafeBufferPointer { s in
+            var done = 0
+            while done < s.count {
+                let n = min(512, s.count - done)
+                analyzer.process(left: s.baseAddress! + done, right: s.baseAddress! + done, frames: n)
+                analyzer.drain(into: &frames)
+                done += n
+            }
+        }
+        return SongFeatures.analyze(frames.suffix(800)[...])
+    }
+    // A drum-machine-like loop: a decaying 60 Hz kick on every beat, a noisy
+    // hat on the off-beats, over a quiet pad.
+    func groove(bpm: Double, seconds: Double = 10, hats: Bool = true) -> [Float] {
+        let n = Int(seconds * fs), beat = 60 / bpm * fs
+        var hiss = noise(n, seed: 51)
+        var hp = Biquad.highpass(cutoff: 6_000, q: 0.707, sampleRate: fs)
+        hiss = hiss.map { hp.process($0) }
+        return (0..<n).map { i -> Float in
+            let t = Double(i).truncatingRemainder(dividingBy: beat) / fs
+            let off = (Double(i) + beat / 2).truncatingRemainder(dividingBy: beat) / fs
+            let kick = 0.8 * sin(2 * .pi * 60 * t) * exp(-t * 18)
+            let hat = hats ? Double(hiss[i]) * 1.5 * exp(-off * 60) : 0
+            let pad = 0.05 * sin(2 * .pi * 220 * Double(i) / fs)
+            return Float(kick + hat + pad)
+        }
+    }
+    for bpm in [90.0, 120.0, 140.0] {
+        let tempo = analyze(groove(bpm: bpm))?.tempo
+        check(tempo.map { abs($0 - bpm) < 3 } ?? false,
+              String(format: "%.0f BPM groove detected as %@", bpm, tempo.map { String(format: "%.1f BPM", $0) } ?? "nothing"))
+    }
+
+    let n = Int(8 * fs)
+    let white = noise(n, seed: 52).map { $0 * 0.3 }
+    var lp = Biquad.lowpass(cutoff: 800, q: 0.707, sampleRate: fs)
+    let dark = white.map { lp.process($0) }
+    if let bright = analyze(white), let dull = analyze(dark) {
+        check(bright.brightness > 0.3 && dull.brightness < 0.02,
+              String(format: "brightness: white noise %.2f, lowpassed noise %.3f", bright.brightness, dull.brightness))
+        check(AutoTune.target(for: bright).tone < 0 && AutoTune.target(for: dull).tone > 0,
+              "bright mixes get a darker reverb, dull mixes a brighter one")
+    } else {
+        check(false, "brightness analysis returned a result")
+    }
+
+    if let busy = analyze(groove(bpm: 170).map { max(min($0 * 4, 1), -1) }),
+       let sparse = analyze(groove(bpm: 70, hats: false)) {
+        let a = AutoTune.target(for: busy), b = AutoTune.target(for: sparse)
+        print(String(format: "  info  busy: %.1f onsets/s, crest %.1f dB → amount %+.2f, size ×%.2f",
+                     busy.onsetRate, busy.crest, a.amount, a.size))
+        print(String(format: "  info  sparse: %.1f onsets/s, crest %.1f dB → amount %+.2f, size ×%.2f",
+                     sparse.onsetRate, sparse.crest, b.amount, b.size))
+        check(a.amount < b.amount && a.size < b.size, "busy, squashed songs get less and shorter reverb than sparse ones")
+    } else {
+        check(false, "density analysis returned a result")
+    }
+
+    var tune = AutoTune()
+    tune.beat = 0.5                                                  // 120 BPM
+    check(abs(tune.syncedPreDelay(near: 30) - 31.25) < 0.01, "pre-delay 30 ms snaps to a 1/64 note at 120 BPM (31.25 ms)")
+    check(analyze([Float](repeating: 0, count: n)) == nil, "silence gives no analysis")
+}
+
 // 3. Impulse responses.
 print("Impulse responses")
 do {

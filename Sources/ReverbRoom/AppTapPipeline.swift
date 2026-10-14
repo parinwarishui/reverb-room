@@ -58,6 +58,8 @@ final class AppTapPipeline: @unchecked Sendable {
 
     let meter = TapMeter()
     private(set) var processor: ReverbProcessor?
+    /// Listens to the song for "Adapt to the song".
+    private(set) var analyzer: SongAnalyzer?
     private(set) var deviceName = ""
     private(set) var sampleRate: Double = 0
 
@@ -146,7 +148,10 @@ final class AppTapPipeline: @unchecked Sendable {
                                  maxFrames: Self.maxFrames)
         self.pitch = pitch
         diag("Pitch shifter latency: \(pitch.latency) frames")
-        let context = IOContext(maxFrames: Self.maxFrames, pitch: pitch, processor: processor, meter: meter)
+        let analyzer = SongAnalyzer(sampleRate: sampleRate)
+        self.analyzer = analyzer
+        let context = IOContext(maxFrames: Self.maxFrames, pitch: pitch, processor: processor,
+                                analyzer: analyzer, meter: meter)
 
         // 5. The real-time callback.
         var newProc: AudioDeviceIOProcID?
@@ -266,9 +271,10 @@ private final class IOContext {
     private let maxFrames: Int
     private let pitch: PitchShifter
     private let processor: ReverbProcessor
+    private let analyzer: SongAnalyzer
     private let meter: TapMeter
 
-    init(maxFrames: Int, pitch: PitchShifter, processor: ReverbProcessor, meter: TapMeter) {
+    init(maxFrames: Int, pitch: PitchShifter, processor: ReverbProcessor, analyzer: SongAnalyzer, meter: TapMeter) {
         left = .allocate(capacity: maxFrames)
         right = .allocate(capacity: maxFrames)
         left.initialize(repeating: 0, count: maxFrames)
@@ -276,6 +282,7 @@ private final class IOContext {
         self.maxFrames = maxFrames
         self.pitch = pitch
         self.processor = processor
+        self.analyzer = analyzer
         self.meter = meter
     }
 
@@ -347,6 +354,7 @@ private final class IOContext {
                 }
             }
 
+            analyzer.process(left: left, right: right, frames: n)       // the song as it arrives
             pitch.process(left: left, right: right, frames: n)
             processor.process(left: left, right: right, frames: n)
 

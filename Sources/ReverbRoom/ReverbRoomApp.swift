@@ -49,7 +49,8 @@ struct MenuBarMenu: View {
                 ))
             }
         }
-        Toggle("Muffle Through Wall", isOn: $model.settings.nextRoom)
+        Toggle("Adapt to Song", isOn: $model.adaptive)
+        Toggle("Muffle Through Wall", isOn: $model.base.nextRoom)
         Divider()
         Button("Open Reverb Room") {
             openWindow(id: "main")
