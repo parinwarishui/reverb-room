@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Reverb Room</string>
+    <key>CFBundleName</key>
+    <string>Reverb Room</string>
+    <key>CFBundleExecutable</key>
+    <string>ReverbRoom</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.reverbroom.app</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0</string>
+    <key>CFBundleVersion</key>
+    <string>3</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Reverb Room listens to the Music app's sound so it can add reverb and play it back to you. Nothing is recorded or saved.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Reverb Room never uses the microphone. Some headphones share one device for sound and mic, so macOS may ask anyway.</string>
+</dict>
+</plist>
