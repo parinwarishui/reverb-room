@@ -41,8 +41,8 @@ there and falls back to ad-hoc signing when it isn't.
 ## How it sounds the way it does
 
 ```
-apps ─► process tap ─► pitch shifter ─┬─────────────────── dry ─┐
-                                       └─ convolution reverb ─ wet ┴─► wall filter ─► limiter ─► speakers
+apps ─► tap ─► pitch shifter ─┬────────────────────────────────────────── dry ─┐
+                               └─ de-ess + soften ─ convolution reverb ─ wet ─┴─► loudness match ─► wall ─► true-peak limiter ─► speakers
 ```
 
 - **Convolution reverb.** Each room is a stereo impulse response generated from
@@ -60,10 +60,23 @@ apps ─► process tap ─► pitch shifter ─┬─────────�
   so loudness stays even as you add reverb.
 - **Next room.** A 24 dB/octave lowpass at 380 Hz with a small low-end resonance
   and make-up gain: the bass thumps through the wall and the rest is gone.
+- **Clean reverb send.** What feeds the reverb is treated like a mix engineer's
+  reverb send: a de-esser turns the band above 5 kHz down by up to 8 dB when "s"
+  sounds and hi-hats dominate, so tails don't fill with hiss, and a transient
+  softener dips sharp drum hits by up to 6 dB, so drums stay punchy instead of
+  smearing. Sustained notes feed the reverb untouched, and the dry song is never
+  processed by either.
+- **Loudness matching (ITU-R BS.1770 / EBU R128).** K-weighted loudness is
+  measured going in and after the mix over R128's 3-second short-term window,
+  and the mix is gently corrected (±6 dB at most) to match. More reverb never
+  makes a song louder or quieter, and the limiter isn't pushed harder. The
+  next-room wall comes after the match, so it still sounds next door.
 - **Reverb ducking.** The reverb dips by up to 5 dB under loud passages and
   blooms back in the gaps, so it never piles on top of an already-full master.
-- **Lookahead limiter.** Peaks are held at -1 dBFS (the streaming true-peak
-  target). The gain is the minimum the next 5 ms needs, averaged over the same
+- **Lookahead true-peak limiter.** Peaks are held at -1 dBTP, the streaming
+  target. Peak detection is 4× oversampled as in BS.1770, so it also catches the
+  inter-sample peaks your DAC reconstructs between samples, which a plain sample
+  limiter misses and which clip in headphones on loud masters. The gain is the minimum the next 5 ms needs, averaged over the same
   5 ms, so it's a smooth ramp that's guaranteed to catch every peak without
   distorting it. Release is program-dependent: 60 ms after a lone peak, 600 ms
   when a whole loud section is being limited, so loud songs don't pump.
@@ -100,7 +113,7 @@ Sources/RRAtomics/     C11 atomics shared with the audio thread
 Sources/RRStretch/     C wrapper around Signalsmith Stretch (vendored, MIT, in vendor/)
 Sources/ReverbDSP/     Impulse-response generator, FFT convolver, pitch shifter, processor, limiter, filters
 Sources/ReverbRoom/    The app: app discovery, tap and pipeline, model, SwiftUI window, menu bar
-Sources/dsp-check/     Self-check: convolution accuracy, latency, limiter, pitch, stereo, CPU
+Sources/dsp-check/     Self-check: convolution, latency, limiter, BS.1770 conformance, pitch, send, CPU
 ```
 
 It uses two private, read-only calls: `TCCAccessPreflight`, to tell a missing

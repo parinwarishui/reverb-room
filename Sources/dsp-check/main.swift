@@ -179,6 +179,106 @@ do {
     check(worst < budget * 0.5, "every callback finishes in under half its time budget")
 }
 
+// 2d. Loudness and true peak (ITU-R BS.1770).
+print("Loudness and true peak")
+do {
+    // Published 48 kHz K-weighting coefficients from BS.1770-4.
+    let k = Biquad.kWeighting(sampleRate: 48_000)
+    let shelf: [Float] = [1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585]
+    let highpass: [Float] = [1, -2, 1, -1.99004745483398, 0.99007225036621]
+    let error = zip(k.shelf.coefficients + k.highpass.coefficients, shelf + highpass).map { abs($0 - $1) }.max() ?? 1
+    check(error < 1e-5, String(format: "K-weighting matches the standard's 48 kHz coefficients (max error %.1e)", error))
+
+    // A 997 Hz sine at 0 dBFS in both channels measures about +0.0 LUFS... per channel -3.01 LUFS.
+    let fs = 48_000.0
+    var k1 = Biquad.kWeighting(sampleRate: fs)
+    var power = 0.0
+    let n = Int(5 * fs)
+    for i in 0..<n {
+        let x = Float(sin(2 * .pi * 997 * Double(i) / fs))
+        let y = k1.highpass.process(k1.shelf.process(x))
+        if i > Int(fs) { power += Double(y * y) }
+    }
+    let lufs = -0.691 + 10 * log10(power / Double(n - Int(fs) - 1))
+    check(abs(lufs - -3.01) < 0.1, String(format: "full-scale 997 Hz sine in one channel reads %.2f LUFS (standard: -3.01)", lufs))
+
+    // A sine at fs/4 sampled 45° off its peaks: samples reach only 0.707 but the
+    // waveform peaks at 1.0 (+3 dB of inter-sample peak).
+    let detector = TruePeakDetector()
+    var found: Float = 0
+    for i in 0..<4800 {
+        let x = Float(sin(Double.pi / 2 * Double(i) + Double.pi / 4))
+        found = max(found, detector.process(x))
+    }
+    check(abs(20 * log10(Double(found))) < 0.2,
+          String(format: "true peak of a 0.707-sample-peak sine reads %.2f dBTP (actual 0.00)", 20 * log10(Double(found))))
+
+    // The limiter keeps the true peak, not just samples, under -1 dBTP.
+    let processor = ReverbProcessor(sampleRate: fs, mix: 0.4, nextRoom: false)
+    processor.submit(processor.makeSpectra(ReverbShape(decay: 3, preDelay: 0.02, tone: 0.6)))
+    var l = (0..<96_000).map { i in Float(1.4 * sin(Double.pi / 2 * Double(i) + Double.pi / 4)) }
+    var r = noise(96_000, seed: 21).map { $0 * 1.4 }
+    processor.process(left: &l, right: &r, frames: l.count)
+    let meterL = TruePeakDetector(), meterR = TruePeakDetector()
+    var outPeak: Float = 0
+    for i in 48_000..<96_000 { outPeak = max(outPeak, meterL.process(l[i]), meterR.process(r[i])) }
+    check(outPeak <= 0.9, String(format: "output true peak %.2f dBTP (ceiling -1)", 20 * log10(Double(outPeak))))
+
+    // Loudness matching: all-wet output ends up as loud as the input.
+    func loudness(_ a: [Float], _ b: [Float], from: Int) -> Double {
+        var kl = Biquad.kWeighting(sampleRate: fs), kr = Biquad.kWeighting(sampleRate: fs)
+        var sum = 0.0
+        for i in 0..<a.count {
+            let x = kl.highpass.process(kl.shelf.process(a[i])), y = kr.highpass.process(kr.shelf.process(b[i]))
+            if i >= from { sum += Double(x * x + y * y) }
+        }
+        return -0.691 + 10 * log10(sum / Double(a.count - from))
+    }
+    let wet = ReverbProcessor(sampleRate: fs, mix: 1, nextRoom: false)
+    wet.submit(wet.makeSpectra(ReverbShape(decay: 4, preDelay: 0.03, tone: 0.5)))
+    let count = Int(14 * fs)
+    let inL = noise(count, seed: 31).map { $0 * 0.25 }, inR = noise(count, seed: 32).map { $0 * 0.25 }
+    var wl = inL, wr = inR
+    wet.process(left: &wl, right: &wr, frames: count)
+    let difference = loudness(wl, wr, from: Int(10 * fs)) - loudness(inL, inR, from: Int(10 * fs))
+    check(abs(difference) < 1, String(format: "100%% reverb is loudness-matched to the input (%+.2f LU)", difference))
+}
+
+// 2e. Reverb send conditioning.
+print("Reverb send")
+do {
+    let fs = 48_000.0
+    // Reverb-only energy with and without conditioning. Loudness matching would
+    // hide the difference, so compare with a short decay and mix fully wet over a
+    // window too short for the matcher to react much.
+    func wetEnergy(_ signal: [Float], conditioned: Bool) -> Double {
+        let p = ReverbProcessor(sampleRate: fs, mix: 1, nextRoom: false, conditionSend: conditioned)
+        p.submit(p.makeSpectra(ReverbShape(decay: 1.5, preDelay: 0, tone: 1)))
+        var l = signal, r = signal
+        p.process(left: &l, right: &r, frames: l.count)
+        return l.reduce(0) { $0 + Double($1 * $1) }
+    }
+    func db(_ a: Double, _ b: Double) -> Double { 10 * log10(a / b) }
+
+    let n = Int(0.6 * fs)
+    let hiss = noise(n, seed: 41).enumerated().map { i, v -> Float in
+        // "s"-like bursts: 80 ms of noise on, 80 ms off (highpassed at 6 kHz below).
+        (i / 3840) % 2 == 0 ? v * 0.3 : 0
+    }
+    var hp = Biquad.highpass(cutoff: 6_000, q: 0.707, sampleRate: fs)
+    let sibilant = hiss.map { hp.process($0) }
+    let deessed = db(wetEnergy(sibilant, conditioned: false), wetEnergy(sibilant, conditioned: true))
+    check(deessed > 4, String(format: "sibilance into the reverb cut by %.1f dB", deessed))
+
+    let tone = (0..<n).map { Float(0.3 * sin(2 * .pi * 300 * Double($0) / fs)) }
+    let toneChange = db(wetEnergy(tone, conditioned: false), wetEnergy(tone, conditioned: true))
+    check(abs(toneChange) < 0.5, String(format: "a sustained 300 Hz note feeds the reverb unchanged (%.2f dB)", toneChange))
+
+    let clicks = (0..<n).map { i -> Float in i % 12_000 < 48 ? Float(0.8 * sin(2 * .pi * 150 * Double(i) / fs)) : 0 }
+    let softened = db(wetEnergy(clicks, conditioned: false), wetEnergy(clicks, conditioned: true))
+    check(softened > 1.5, String(format: "drum-like hits into the reverb softened by %.1f dB", softened))
+}
+
 // 3. Impulse responses.
 print("Impulse responses")
 do {

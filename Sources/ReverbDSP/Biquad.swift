@@ -29,6 +29,30 @@ public struct Biquad {
                           a0: 1 + alpha / a, a1: -2 * cosw, a2: 1 - alpha / a)
     }
 
+    /// ITU-R BS.1770 K-weighting: a +4 dB high shelf (the head's acoustic effect)
+    /// followed by the "RLB" highpass. Derived for any sample rate from the
+    /// standard's analog prototypes; at 48 kHz it reproduces the published coefficients.
+    public static func kWeighting(sampleRate fs: Double) -> (shelf: Biquad, highpass: Biquad) {
+        // Stage 1: high shelf.
+        var k = tan(Double.pi * 1681.974450955533 / fs)
+        var q = 0.7071752369554196
+        let vh = pow(10, 3.999843853973347 / 20)
+        let vb = pow(vh, 0.4996667741545416)
+        var a0 = 1 + k / q + k * k
+        let shelf = normalized(b0: vh + vb * k / q + k * k, b1: 2 * (k * k - vh), b2: vh - vb * k / q + k * k,
+                               a0: a0, a1: 2 * (k * k - 1), a2: 1 - k / q + k * k)
+        // Stage 2: highpass (numerator fixed at 1, -2, 1 as in the standard).
+        k = tan(Double.pi * 38.13547087602444 / fs)
+        q = 0.5003270373238773
+        a0 = 1 + k / q + k * k
+        let highpass = Biquad(b0: 1, b1: -2, b2: 1,
+                              a1: Float(2 * (k * k - 1) / a0), a2: Float((1 - k / q + k * k) / a0))
+        return (shelf, highpass)
+    }
+
+    /// The raw coefficients, for checking against published values.
+    public var coefficients: [Float] { [b0, b1, b2, a1, a2] }
+
     private static func shape(_ frequency: Double, _ q: Double, _ fs: Double) -> (cosw: Double, alpha: Double) {
         let w = 2 * Double.pi * min(frequency, 0.45 * fs) / fs
         return (cos(w), sin(w) / (2 * q))

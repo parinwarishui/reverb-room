@@ -2,8 +2,8 @@
 //  ReverbProcessor.swift
 //  Everything after the pitch shifter, in one real-time object:
 //
-//    in ─┬───────────────────────────── dry gain ─┐
-//        └─ crossfeed ─ convolution ─── wet gain ─┴─► next-room wall ─► limiter ─► out
+//    in ─┬──────────────────────────────────────────── dry gain ─┐
+//        └─ crossfeed ─ de-ess + soften ─ convolution ─ wet gain ─┴─► match ─► wall ─► limiter ─► out
 //
 //  Audio moves in blocks of B samples, so the output is B samples late (21 ms at
 //  48 kHz), plus 5 ms of limiter lookahead. Dry and wet are delayed together,
@@ -13,9 +13,13 @@
 //  - An equal-power dry/wet mix keeps loudness steady as the amount changes.
 //  - The reverb ducks by up to 5 dB under loud passages and blooms back in the
 //    gaps (sidechain ducking), so it doesn't pile on top of an already-full mix.
-//  - A lookahead limiter holds peaks at -1 dBFS (the streaming true-peak target)
-//    with a smooth gain curve and program-dependent release, instead of clipping
-//    or pumping.
+//  - Loudness matching: K-weighted loudness (ITU-R BS.1770, over EBU R128's 3 s
+//    short-term window) is measured going in and after the mix, and the mix is
+//    slowly corrected to match, so reverb never makes a song louder or quieter.
+//    The next-room wall comes after, so it still sounds like it's next door.
+//  - A lookahead true-peak limiter holds peaks, including the inter-sample peaks
+//    a DAC reconstructs, at -1 dBTP (the streaming target), with a smooth gain
+//    curve and program-dependent release, instead of clipping or pumping.
 //
 //  Control methods (setMix, setNextRoom, submit, collectGarbage) are safe from any
 //  thread. process() is real-time safe: no locks, no allocation, and nothing
@@ -53,6 +57,20 @@ public final class ReverbProcessor {
     private static let wallMakeup: Float = 1.35
 
     private let limiter: LookaheadLimiter
+    private var send: SendConditioner
+    private let conditionSend: Bool
+
+    // Loudness matching (BS.1770 K-weighted, R128 short-term): the mix is nudged so
+    // it's as loud as what came in, whatever the reverb amount or room.
+    private var inputLoudness: LoudnessMeter
+    private var mixLoudness: LoudnessMeter
+    private var matchGain: Float = 1
+    private var matchTarget: Float = 1
+    private let matchSmoothing: Float
+    private var matchCounter = 0
+    /// Below about -60 LUFS (silence, a fading tail) the correction holds still.
+    private static let matchGate: Float = 1.2e-6
+    private static let matchRange: ClosedRange<Float> = 0.5...2      // ±6 dB
 
     // Reverb ducking: follows the dry level and turns the wet down under loud parts.
     private var duckEnvelope: Float = 0
@@ -69,7 +87,10 @@ public final class ReverbProcessor {
     private let retired = AtomicPointerSlot()
     private var current: UnsafeMutableRawPointer?
 
-    public init(sampleRate: Double, blockSize: Int = 1024, mix: Float, nextRoom: Bool) {
+    /// `conditionSend: false` turns off the send de-esser and transient softener
+    /// (for A/B checks).
+    public init(sampleRate: Double, blockSize: Int = 1024, mix: Float, nextRoom: Bool,
+                conditionSend: Bool = true) {
         self.sampleRate = sampleRate
         self.blockSize = blockSize
         let longest = (ImpulseResponse.maxDecay + ImpulseResponse.maxPreDelay) * sampleRate
@@ -107,6 +128,11 @@ public final class ReverbProcessor {
         wallRight.initialize(from: wall, count: Self.wallStages)
 
         limiter = LookaheadLimiter(sampleRate: sampleRate, ceilingDB: -1, lookahead: 0.005)
+        send = SendConditioner(sampleRate: sampleRate)
+        self.conditionSend = conditionSend
+        inputLoudness = LoudnessMeter(sampleRate: sampleRate)
+        mixLoudness = LoudnessMeter(sampleRate: sampleRate)
+        matchSmoothing = Float(1 - exp(-1 / (1.5 * sampleRate)))
         duckAttack = Float(1 - exp(-1 / (0.01 * sampleRate)))
         duckRelease = Float(1 - exp(-1 / (0.35 * sampleRate)))
     }
@@ -188,8 +214,11 @@ public final class ReverbProcessor {
         // True-stereo send, scaled so a centred signal reaches the reverb at unity.
         let feedScale = 1 / (1 + Self.crossfeed)
         for i in 0..<B {
-            feedLeft[i] = (inLeft[i] + Self.crossfeed * inRight[i]) * feedScale
-            feedRight[i] = (inRight[i] + Self.crossfeed * inLeft[i]) * feedScale
+            var l = (inLeft[i] + Self.crossfeed * inRight[i]) * feedScale
+            var r = (inRight[i] + Self.crossfeed * inLeft[i]) * feedScale
+            if conditionSend { send.process(&l, &r) }
+            feedLeft[i] = l
+            feedRight[i] = r
         }
         convolver.push(feedLeft, feedRight)
 
@@ -239,6 +268,20 @@ public final class ReverbProcessor {
             var l = inLeft[i] * dryGain + wetLeft[i] * wet
             var r = inRight[i] * dryGain + wetRight[i] * wet
 
+            inputLoudness.process(inLeft[i], inRight[i])
+            mixLoudness.process(l, r)
+            matchCounter += 1
+            if matchCounter == 64 {
+                matchCounter = 0
+                if inputLoudness.power > Self.matchGate, mixLoudness.power > Self.matchGate {
+                    let ratio = (inputLoudness.power / mixLoudness.power).squareRoot()
+                    matchTarget = min(max(ratio, Self.matchRange.lowerBound), Self.matchRange.upperBound)
+                }
+            }
+            matchGain += (matchTarget - matchGain) * matchSmoothing
+            l *= matchGain
+            r *= matchGain
+
             var wallL = l, wallR = r
             for f in 0..<Self.wallStages {
                 wallL = wallLeft[f].process(wallL)
@@ -263,10 +306,11 @@ public final class ReverbProcessor {
     private static func wet(_ amount: Float) -> Float { sin(amount * .pi / 2) }
 }
 
-/// Stereo-linked lookahead peak limiter, built so it never distorts and never
-/// pumps on dense, loud masters:
+/// Stereo-linked lookahead true-peak limiter, built so it never distorts and
+/// never pumps on dense, loud masters:
 ///
-/// - Gain computer: the gain each sample needs to stay under the ceiling.
+/// - Gain computer: the gain each sample needs to keep its true peak (BS.1770,
+///   4× oversampled, so inter-sample peaks count too) under the ceiling.
 /// - Hold the lowest of those over the lookahead window, then average over the
 ///   same window. The gain curve is smooth (a linear ramp, no corners), and it
 ///   reaches the full reduction exactly when the peak leaves the delay line, so
@@ -282,8 +326,14 @@ final class LookaheadLimiter {
     private let slowRelease: Float
     private let reductionSmoothing: Float
 
-    private let delayLeft, delayRight, required, held: UnsafeMutablePointer<Float>
+    private let required, held: UnsafeMutablePointer<Float>
     private var index = 0
+    /// Audio waits `window - 1` frames for the gain plus the detector's own lag.
+    private let delayLeft, delayRight: UnsafeMutablePointer<Float>
+    private let delaySize: Int
+    private var delayIndex = 0
+    private let peakLeft = TruePeakDetector()
+    private let peakRight = TruePeakDetector()
     private var heldSum: Float
     private var gain: Float = 1
     /// Smoothed amount of gain reduction, 0...1, to pick the release speed.
@@ -292,7 +342,8 @@ final class LookaheadLimiter {
     init(sampleRate: Double, ceilingDB: Double, lookahead: Double) {
         let size = max(2, Int(lookahead * sampleRate))
         window = size
-        delay = size - 1
+        delaySize = size + TruePeakDetector.latency
+        delay = delaySize - 1
         ceiling = Float(pow(10, ceilingDB / 20))
         fastRelease = Float(1 - exp(-1 / (0.06 * sampleRate)))
         slowRelease = Float(1 - exp(-1 / (0.6 * sampleRate)))
@@ -302,7 +353,11 @@ final class LookaheadLimiter {
             p.initialize(repeating: value, count: size)
             return p
         }
-        delayLeft = ring(0); delayRight = ring(0); required = ring(1); held = ring(1)
+        required = ring(1); held = ring(1)
+        delayLeft = .allocate(capacity: delaySize)
+        delayRight = .allocate(capacity: delaySize)
+        delayLeft.initialize(repeating: 0, count: delaySize)
+        delayRight.initialize(repeating: 0, count: delaySize)
         heldSum = Float(size)
     }
 
@@ -312,7 +367,7 @@ final class LookaheadLimiter {
 
     @inline(__always)
     func process(_ l: inout Float, _ r: inout Float) {
-        let peak = max(abs(l), abs(r))
+        let peak = max(peakLeft.process(l), peakRight.process(r))
         required[index] = peak > ceiling ? ceiling / peak : 1
 
         var lowest: Float = 1
@@ -329,8 +384,10 @@ final class LookaheadLimiter {
         }
         recentReduction += ((1 - gain) - recentReduction) * reductionSmoothing
 
-        delayLeft[index] = l
-        delayRight[index] = r
+        delayLeft[delayIndex] = l
+        delayRight[delayIndex] = r
+        delayIndex += 1
+        if delayIndex == delaySize { delayIndex = 0 }
         index += 1
         if index == window {
             index = 0
@@ -338,8 +395,72 @@ final class LookaheadLimiter {
             heldSum = 0
             for k in 0..<window { heldSum += held[k] }
         }
-        // The oldest sample in the ring, written `delay` samples ago.
-        l = min(max(delayLeft[index] * gain, -1), 1)
-        r = min(max(delayRight[index] * gain, -1), 1)
+        // The oldest sample in the delay ring, written `delay` samples ago.
+        l = min(max(delayLeft[delayIndex] * gain, -1), 1)
+        r = min(max(delayRight[delayIndex] * gain, -1), 1)
+    }
+}
+
+/// Cleans up what goes *into* the reverb, the way a mix engineer treats a reverb
+/// send. The dry signal never passes through here.
+///
+/// - De-esser: when the band above 5 kHz dominates ("s" sounds, hi-hats), that
+///   band is turned down by up to 8 dB, so the tail doesn't fill with hiss.
+/// - Transient softener: when a fast envelope jumps above a slow one (a drum
+///   hit), the send dips by up to 6 dB, so drums stay punchy instead of smearing
+///   into the room. Sustained notes still feed the reverb fully.
+struct SendConditioner {
+    private var highLeft, highRight: Biquad
+    private var highEnvelope: Float = 0
+    private var fullEnvelope: Float = 0
+    private var deessGain: Float = 1
+    private var fastEnvelope: Float = 0
+    private var slowEnvelope: Float = 0
+    private var transientGain: Float = 1
+
+    private let fastAttack, envelopeRelease, slowAttack, slowRelease, fastRelease: Float
+    private let gainAttack, gainRelease: Float
+
+    init(sampleRate fs: Double) {
+        highLeft = .highpass(cutoff: 5_000, q: 0.707, sampleRate: fs)
+        highRight = highLeft
+        func coefficient(_ seconds: Double) -> Float { Float(1 - exp(-1 / (seconds * fs))) }
+        fastAttack = coefficient(0.0005)
+        envelopeRelease = coefficient(0.05)
+        fastRelease = coefficient(0.02)
+        slowAttack = coefficient(0.02)
+        slowRelease = coefficient(0.2)
+        gainAttack = coefficient(0.001)
+        gainRelease = coefficient(0.04)
+    }
+
+    @inline(__always)
+    private static func follow(_ envelope: inout Float, _ level: Float, _ attack: Float, _ release: Float) {
+        envelope += (level - envelope) * (level > envelope ? attack : release)
+    }
+
+    @inline(__always)
+    mutating func process(_ l: inout Float, _ r: inout Float) {
+        // De-esser: complementary split, so with no reduction the sum is exact.
+        let highL = highLeft.process(l), highR = highRight.process(r)
+        Self.follow(&highEnvelope, max(abs(highL), abs(highR)), fastAttack, envelopeRelease)
+        Self.follow(&fullEnvelope, max(abs(l), abs(r)), fastAttack, envelopeRelease)
+        let share = highEnvelope / (fullEnvelope + 1e-6)
+        let sibilance = min(max((share - 0.35) / 0.3, 0), 1)
+        let deessTarget = 1 - 0.6 * sibilance                       // down to ≈ -8 dB
+        deessGain += (deessTarget - deessGain) * (deessTarget < deessGain ? gainAttack : gainRelease)
+        l += highL * (deessGain - 1)
+        r += highR * (deessGain - 1)
+
+        // Transient softener.
+        let level = max(abs(l), abs(r))
+        Self.follow(&fastEnvelope, level, fastAttack, fastRelease)
+        Self.follow(&slowEnvelope, level, slowAttack, slowRelease)
+        let jump = fastEnvelope / (slowEnvelope + 1e-6)
+        let transient = min(max((jump - 1.4) / 1.6, 0), 1)
+        let transientTarget = 1 - 0.5 * transient                   // down to ≈ -6 dB
+        transientGain += (transientTarget - transientGain) * (transientTarget < transientGain ? gainAttack : gainRelease)
+        l *= transientGain
+        r *= transientGain
     }
 }
