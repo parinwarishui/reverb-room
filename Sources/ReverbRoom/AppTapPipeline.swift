@@ -1,7 +1,7 @@
 //
-//  MusicTapPipeline.swift
+//  AppTapPipeline.swift
 //
-//    Apple Music ──► process tap (Music's own output muted while tapped)
+//    selected apps ──► one process tap (their own output muted while tapped)
 //                      │
 //                      ▼
 //    private aggregate device   [clock = your output device]
@@ -15,7 +15,7 @@
 //                      ▼
 //    aggregate output ─► your speakers or headphones
 //
-//  One pipeline per start; teardown() destroys everything, which un-mutes Music.
+//  One pipeline per start; teardown() destroys everything, which un-mutes the apps.
 //
 
 import AVFoundation
@@ -36,8 +36,8 @@ enum PipelineError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noOutputDevice: return "No speakers or headphones found."
-        case .tapFailed(let s): return "Couldn't listen to Music (error \(s))."
-        case .unsupportedFormat: return "Music's audio arrived in an unexpected format."
+        case .tapFailed(let s): return "Couldn't listen to the app (error \(s))."
+        case .unsupportedFormat: return "The app's audio arrived in an unexpected format."
         case .aggregateFailed(let s): return "Couldn't connect to your speakers (error \(s))."
         case .aggregateNotReady: return "Your speakers didn't respond in time."
         case .engineFailed(let detail): return "The pitch shifter failed: \(detail)."
@@ -56,7 +56,7 @@ final class TapMeter {
 
 /// Sendable by contract: start() and teardown() run only on the model's serial
 /// audio queue, and the rest is either set before start() returns or atomic.
-final class MusicTapPipeline: @unchecked Sendable {
+final class AppTapPipeline: @unchecked Sendable {
     private static let maxFrames = 4096
 
     let meter = TapMeter()
@@ -77,8 +77,8 @@ final class MusicTapPipeline: @unchecked Sendable {
 
     deinit { teardown() }
 
-    /// Builds and starts everything. Music is only muted by the final step, so if
-    /// anything throws it keeps playing normally. Call teardown() after a throw.
+    /// Builds and starts everything. The apps are only muted by the final step, so
+    /// if anything throws they keep playing normally. Call teardown() after a throw.
     func start(processes: [AudioObjectID], settings: ReverbSettings,
                onDeviceChange: @escaping () -> Void) throws {
         guard let output = AudioHW.defaultOutputDevice(),
@@ -88,7 +88,7 @@ final class MusicTapPipeline: @unchecked Sendable {
         deviceName = AudioHW.string(output, kAudioObjectPropertyName) ?? "your speakers"
         let bluetooth = AudioHW.isBluetooth(output)
 
-        // 1. Tap Music. Its normal output goes silent once we start reading the tap.
+        // 1. Tap the apps. Their normal output goes silent once we start reading the tap.
         let tap = CATapDescription(stereoMixdownOfProcesses: processes)
         tap.uuid = UUID()
         tap.name = "Reverb Room"
@@ -158,7 +158,7 @@ final class MusicTapPipeline: @unchecked Sendable {
         procID = newProc
         useOnlyTapStream(inputStreams: inputStreams, procID: newProc)
 
-        // 6. Go. From here on Music is muted and we're the ones playing it.
+        // 6. Go. From here on the apps are muted and we're the ones playing them.
         let startStatus = AudioDeviceStart(aggregateID, newProc)
         guard startStatus == noErr else { throw PipelineError.startFailed(startStatus) }
 
@@ -179,7 +179,7 @@ final class MusicTapPipeline: @unchecked Sendable {
         processor.submit(processor.makeSpectra(shape))
     }
 
-    /// Idempotent. Stopping the IOProc and destroying the tap un-mutes Music.
+    /// Idempotent. Stopping the IOProc and destroying the tap un-mutes the apps.
     func teardown() {
         for var listener in listeners {
             AudioObjectRemovePropertyListenerBlock(listener.object, &listener.address, listenerQueue, listener.block)
@@ -405,7 +405,7 @@ private final class IOContext {
                 if l != left { left.update(from: l, count: n) }
                 if r != right { right.update(from: r, count: n) }
             } else {
-                // Music is muted, so never go silent: skip the pitch shifter instead.
+                // The apps are muted, so never go silent: skip the pitch shifter instead.
                 meter.renderFailures.increment()
                 fifo.pop(left, right, frames: n)
             }

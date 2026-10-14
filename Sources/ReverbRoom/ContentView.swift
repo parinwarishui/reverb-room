@@ -13,13 +13,15 @@ struct ContentView: View {
             header
             StatusCard(model: model)
                 .padding(.top, 22)
-            presets
+            AppPicker(model: model)
                 .padding(.top, 18)
+            presets
+                .padding(.top, 20)
             sliders
                 .padding(.top, 18)
             nextRoom
                 .padding(.top, 22)
-            Text("Apple Music keeps the song's speed. Lower the pitch to get the slowed sound.")
+            Text("Apps keep the song's speed. Lower the pitch to get the slowed sound.")
                 .font(.system(size: 13.5))
                 .foregroundStyle(.white.opacity(0.5))
                 .fixedSize(horizontal: false, vertical: true)
@@ -37,7 +39,9 @@ struct ContentView: View {
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("FOR APPLE MUSIC")
+                Text(model.headerLabel)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .font(.system(size: 11.5, weight: .semibold))
                     .tracking(1.8)
                     .foregroundStyle(.white.opacity(0.55))
@@ -155,7 +159,7 @@ struct StatusCard: View {
         switch model.status {
         case .off: return .white.opacity(0.35)
         case .live: return Color(red: 0.42, green: 0.86, blue: 0.55)
-        case .waitingForMusic, .waitingForPlay, .connecting: return Color(red: 0.98, green: 0.78, blue: 0.35)
+        case .noApps, .waitingForApps, .waitingForPlay, .connecting: return Color(red: 0.98, green: 0.78, blue: 0.35)
         case .noSignal, .failed: return Color(red: 1.0, green: 0.55, blue: 0.35)
         }
     }
@@ -173,12 +177,13 @@ struct StatusCard: View {
                 if case .live = model.status {
                     LevelMeter(model: model)
                 }
-                if case .noSignal(permission: true) = model.status {
+                if case .noSignal(_, permission: true, _) = model.status {
                     Button("Open Privacy Settings…") { AudioCapturePermission.openSettings() }
                         .controlSize(.small)
                 }
-                if model.status == .waitingForMusic {
-                    Button("Open Music") { MusicApp.open() }
+                if case .waitingForApps = model.status,
+                   let first = model.chips.first(where: \.selected) {
+                    Button("Open \(first.name)") { AudioApps.open(first.id) }
                         .controlSize(.small)
                 }
             }
@@ -208,6 +213,119 @@ struct LevelMeter: View {
         }
         .frame(height: 4)
         .accessibilityHidden(true)
+    }
+}
+
+/// Which apps get reverb. Tap a chip to select or deselect it.
+struct AppPicker: View {
+    let model: Model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Add reverb to")
+                    .font(.system(size: 15.5, weight: .semibold))
+                Spacer()
+                Text("For YouTube, pick your browser")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            FlowLayout(spacing: 6) {
+                ForEach(model.chips) { chip in
+                    AppChip(chip: chip) { model.toggleSource(chip.id) }
+                }
+            }
+            if model.chips.count <= 1 {
+                Text("Other apps show up here once they play sound.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+        }
+    }
+}
+
+struct AppChip: View {
+    let chip: SourceChip
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon = AudioApps.icon(chip.id) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 16, height: 16)
+                }
+                Text(chip.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                if chip.playing {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(chip.selected ? Color(red: 0.42, green: 0.66, blue: 0.5)
+                                                       : Color(red: 0.42, green: 0.86, blue: 0.55))
+                }
+                if chip.selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                }
+            }
+            .foregroundStyle(chip.selected ? Color(red: 0.25, green: 0.15, blue: 0.40) : .white)
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .frame(height: 28)
+            .background(Capsule().fill(chip.selected ? Color.white : Color.white.opacity(0.07)))
+            .overlay(Capsule().strokeBorder(.white.opacity(chip.selected ? 0 : 0.14), lineWidth: 1))
+            .opacity(chip.running || chip.selected ? 1 : 0.55)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.15), value: chip.selected)
+        .help(chip.selected ? "Stop adding reverb to \(chip.name)" : "Add reverb to \(chip.name)")
+        .accessibilityLabel(chip.name)
+        .accessibilityAddTraits(chip.selected ? .isSelected : [])
+        .accessibilityHint(chip.playing ? "Playing" : "")
+    }
+}
+
+/// Lays children out left to right, wrapping onto new rows.
+struct FlowLayout: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let height = rows.last.map { $0.y + $0.height } ?? 0
+        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: bounds.minY + row.y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+        }
+    }
+
+    private struct Row { var indices: [Int] = []; var y: CGFloat = 0; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var row = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            if !row.indices.isEmpty, row.width + spacing + size.width > width {
+                rows.append(row)
+                row = Row(y: row.y + row.height + spacing)
+            }
+            row.width += (row.indices.isEmpty ? 0 : spacing) + size.width
+            row.height = max(row.height, size.height)
+            row.indices.append(index)
+        }
+        if !row.indices.isEmpty { rows.append(row) }
+        return rows
     }
 }
 

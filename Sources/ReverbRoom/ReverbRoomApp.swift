@@ -41,6 +41,14 @@ struct MenuBarMenu: View {
             ))
         }
         Divider()
+        Menu("Apps") {
+            ForEach(model.chips) { chip in
+                Toggle(chip.name, isOn: Binding(
+                    get: { chip.selected },
+                    set: { _ in model.toggleSource(chip.id) }
+                ))
+            }
+        }
         Toggle("Muffle Through Wall", isOn: $model.settings.nextRoom)
         Divider()
         Button("Open Reverb Room") {
@@ -57,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // `kill` or Ctrl+C: stop audio first so Music isn't left muted.
+        // `kill` or Ctrl+C: stop audio first so no app is left muted.
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)

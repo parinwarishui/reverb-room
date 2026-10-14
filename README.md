@@ -1,11 +1,22 @@
 # Reverb Room
 
-Live reverb for Apple Music on macOS. Turn it on and whatever Music plays comes
-through a room: Slowed + Reverb, Concert Hall, Cathedral, Studio Room, Next Room
-or Vaporwave, or your own settings for amount, room size, pre-delay, tone and pitch.
+Live reverb for any app on macOS: Apple Music, Spotify, YouTube in your browser,
+or anything else that plays sound. Pick one or several apps, turn it on, and they
+come through a room: Slowed + Reverb, Concert Hall, Cathedral, Studio Room, Next
+Room or Vaporwave, or your own settings for amount, room size, pre-delay, tone and
+pitch.
 
-It taps Music directly with a Core Audio process tap (macOS 14.2+), so there's no
-virtual audio driver to install and no output device to switch.
+It taps the apps directly with a Core Audio process tap (macOS 14.2+), so there's
+no virtual audio driver to install and no output device to switch.
+
+## Choosing apps
+
+Under **Add reverb to**, tap an app to select or deselect it; every selected app
+gets the same room. Apple Music and any running media apps (Spotify, Safari,
+Chrome, Arc, Firefox, Edge, Brave, TV, Podcasts and more) are listed straight
+away; other apps appear once they play sound. For YouTube, pick the browser it's
+playing in (every tab in that browser gets the reverb). The same list is under
+**Apps** in the menu bar menu, and your choice is remembered between launches.
 
 ## Build and install
 
@@ -30,7 +41,7 @@ there and falls back to ad-hoc signing when it isn't.
 ## How it sounds the way it does
 
 ```
-Music ─► process tap ─► pitch shifter ─┬─────────────────── dry ─┐
+apps ─► process tap ─► pitch shifter ─┬─────────────────── dry ─┐
                                        └─ convolution reverb ─ wet ┴─► wall filter ─► limiter ─► speakers
 ```
 
@@ -52,7 +63,7 @@ Music ─► process tap ─► pitch shifter ─┬─────────�
 - **Lookahead limiter.** Peaks are held at -1 dBFS (the streaming true-peak
   target) by easing the gain down 1.5 ms ahead of them, rather than clipping.
 - **Pitch.** Apple's time-pitch unit with 16× overlap for a smoother shift.
-  Music keeps the song's speed; lower the pitch for the slowed sound. At 0 it's
+  The app keeps the song's speed; lower the pitch for the slowed sound. At 0 it's
   bypassed entirely.
 - **Smooth changes.** Slider moves ramp over one block and room changes crossfade,
   so nothing clicks.
@@ -65,23 +76,26 @@ watching a music video.
 
 | You see | What to do |
 | --- | --- |
-| "Music is playing but no sound is reaching Reverb Room" | Allow System Audio Recording (see above). |
+| "… is playing but no sound is reaching Reverb Room. Allow it…" | Allow System Audio Recording (see above). |
 | "This song isn't reaching Reverb Room…" | The song is playing in Dolby Atmos. In Music, open Settings › Playback and set Dolby Atmos to Off. |
-| "Waiting for Music. Press play to start." | Music hasn't opened audio yet. Press play. |
+| "Waiting for Spotify. Press play to start." | The app hasn't opened audio yet. Press play. |
+| An app isn't in the list | It appears once it has played some sound. |
 
 Closing the window keeps the reverb running; use the waveform icon in the menu
-bar to change rooms, turn it off or quit. Quitting, or `kill`, always un-mutes
-Music first.
+bar to change rooms or apps, turn it off or quit. Quitting, or `kill`, always
+un-mutes the apps first.
 
 ## Project layout
 
 ```
 Sources/RRAtomics/     C11 atomics shared with the audio thread
 Sources/ReverbDSP/     Impulse-response generator, FFT convolver, processor, limiter, filters
-Sources/ReverbRoom/    The app: Music tap and pipeline, model, SwiftUI window, menu bar
+Sources/ReverbRoom/    The app: app discovery, tap and pipeline, model, SwiftUI window, menu bar
 Sources/dsp-check/     Self-check: convolution accuracy, latency, limiter, stereo, CPU
 ```
 
-It uses one private call (`TCCAccessPreflight`, read-only) to tell a missing
-permission apart from a Dolby Atmos song. That's fine for a personal app, but the
-App Store wouldn't accept it.
+It uses two private, read-only calls: `TCCAccessPreflight`, to tell a missing
+permission apart from a Dolby Atmos song, and
+`responsibility_get_pid_responsible_for_pid`, to trace Safari's WebKit audio
+process back to Safari. That's fine for a personal app, but the App Store wouldn't
+accept it.
