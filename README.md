@@ -11,8 +11,9 @@ no virtual audio driver to install and no output device to switch.
 
 ## Choosing apps
 
-Under **Add reverb to**, tap an app to select or deselect it; every selected app
-gets the same room. Apple Music and any running media apps (Spotify, Safari,
+Open **Settings** with the gear next to the power button (or ⌘, or **Settings…**
+in the menu bar menu). Under **Apps › Add reverb to**, tap an app to select or
+deselect it; every selected app gets the same room. Apple Music and any running media apps (Spotify, Safari,
 Chrome, Arc, Firefox, Edge, Brave, TV, Podcasts and more) are listed straight
 away; other apps appear once they play sound. For YouTube, pick the browser it's
 playing in (every tab in that browser gets the reverb). The same list is under

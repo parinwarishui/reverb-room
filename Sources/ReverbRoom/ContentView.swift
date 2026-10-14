@@ -13,10 +13,8 @@ struct ContentView: View {
             header
             StatusCard(model: model)
                 .padding(.top, 22)
-            AppPicker(model: model)
-                .padding(.top, 18)
             presets
-                .padding(.top, 20)
+                .padding(.top, 18)
             adaptRow
                 .padding(.top, 20)
             sliders
@@ -51,8 +49,11 @@ struct ContentView: View {
                     .font(.system(size: 32, weight: .bold))
             }
             Spacer()
-            PowerButton(isOn: model.isOn) { model.toggle() }
-                .offset(y: -6)
+            HStack(spacing: 10) {
+                SettingsButton()
+                PowerButton(isOn: model.isOn) { model.toggle() }
+            }
+            .offset(y: -6)
         }
     }
 
@@ -161,6 +162,61 @@ struct Backdrop: View {
             RadialGradient(colors: [Color(red: 0.17, green: 0.13, blue: 0.29).opacity(0.9), .clear],
                            center: .bottomTrailing, startRadius: 0, endRadius: 420)
         }
+    }
+}
+
+/// Small gear that opens the Settings window.
+struct SettingsButton: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button {
+            openSettings()
+            NSApp.activate(ignoringOtherApps: true)
+        } label: {
+            Image(systemName: "gearshape.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(Color.white.opacity(0.08)))
+                .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("Settings (⌘,)")
+        .accessibilityLabel("Settings")
+    }
+}
+
+/// The Settings window. Apps live here, out of the main window.
+struct SettingsView: View {
+    let model: Model
+
+    var body: some View {
+        TabView {
+            AppsSettings(model: model)
+                .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
+        }
+        .frame(width: 440)
+        .preferredColorScheme(.dark)
+    }
+}
+
+struct AppsSettings: View {
+    let model: Model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            AppPicker(model: model)
+            Text("Selected apps are muted and played through Reverb Room while it's on. An app shows up here once it has played some sound.")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.5))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .foregroundStyle(.white)
+        .background(Backdrop().ignoresSafeArea())
     }
 }
 

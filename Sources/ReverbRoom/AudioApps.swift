@@ -46,16 +46,20 @@ enum AudioApps {
     /// Every app that owns at least one Core Audio process object, keyed by bundle ID.
     static func scan() -> [String: AudioApp] {
         var appsByPID: [pid_t: NSRunningApplication] = [:]
+        var appsByPath: [String: NSRunningApplication] = [:]
         for app in NSWorkspace.shared.runningApplications where app.bundleURL?.pathExtension == "app" {
             appsByPID[app.processIdentifier] = app
+            if let path = app.bundleURL?.standardizedFileURL.path { appsByPath[path] = app }
         }
 
         var result: [String: AudioApp] = [:]
         for object in AudioHW.objectList(AudioHW.system, kAudioHardwarePropertyProcessObjectList) {
             guard let pid = AudioHW.read(object, kAudioProcessPropertyPID, as: pid_t(-1)), pid > 0, pid != ownPID,
-                  let app = owner(of: pid, appsByPID: appsByPID),
+                  let helper = owner(of: pid, appsByPID: appsByPID),
+                  case let app = outermost(helper, appsByPath: appsByPath),
                   app.processIdentifier != ownPID,
-                  let id = app.bundleIdentifier, id != ownBundleID else { continue }
+                  let id = app.bundleIdentifier, id != ownBundleID,
+                  !id.hasPrefix("local.reverbroom") else { continue }       // never tap any Reverb Room build
             var entry = result[id] ?? AudioApp(id: id)
             entry.objects.append(object)
             if (AudioHW.read(object, kAudioProcessPropertyIsRunningOutput, as: UInt32(0)) ?? 0) != 0 {
@@ -125,6 +129,17 @@ enum AudioApps {
                                  "responsibility_get_pid_responsible_for_pid") else { return nil }
         return unsafeBitCast(symbol, to: ResponsibleFn.self)
     }()
+
+    /// Some apps ship helpers as .app bundles inside their own bundle (Microsoft
+    /// Teams' "WebView", Electron and Chromium helpers). Those belong to the
+    /// outer app, so it's listed once under its own name.
+    private static func outermost(_ app: NSRunningApplication,
+                                  appsByPath: [String: NSRunningApplication]) -> NSRunningApplication {
+        guard let path = app.bundleURL?.standardizedFileURL.path,
+              let range = path.range(of: ".app/") else { return app }
+        let outer = String(path[..<range.lowerBound]) + ".app"
+        return appsByPath[outer] ?? app
+    }
 
     private static func owner(of pid: pid_t, appsByPID: [pid_t: NSRunningApplication]) -> NSRunningApplication? {
         if let app = appsByPID[pid] { return app }

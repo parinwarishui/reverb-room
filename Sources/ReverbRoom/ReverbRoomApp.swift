@@ -23,12 +23,17 @@ struct ReverbRoomApp: App {
             Image(systemName: delegate.model.isOn ? "waveform.circle.fill" : "waveform.circle")
         }
         .menuBarExtraStyle(.menu)
+
+        Settings {
+            SettingsView(model: delegate.model)
+        }
     }
 }
 
 struct MenuBarMenu: View {
     @Bindable var model: Model
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Text(model.status.shortMessage)
@@ -56,6 +61,11 @@ struct MenuBarMenu: View {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("Settings…") {
+            openSettings()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut(",")
         Button("Quit Reverb Room") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
