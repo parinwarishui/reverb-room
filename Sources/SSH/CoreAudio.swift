@@ -7,19 +7,19 @@ import AppKit
 import CoreAudio
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "SSH", category: "SSH")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "ReverbRoom", category: "ReverbRoom")
 
 /// Logs a message with nothing personal in it (states, counts, error codes). It's
 /// readable by any process in the unified log, so app and device names go through
 /// `dlog(_:private:)` instead.
 func dlog(_ message: String) {
-    logger.log("[SSH] \(message, privacy: .public)")
+    logger.log("[Reverb Room] \(message, privacy: .public)")
 }
 
 /// Logs `message` in the clear and `detail` (app names, device names and UIDs)
 /// redacted, so the log shows `<private>` in its place.
 func dlog(_ message: String, private detail: String) {
-    logger.log("[SSH] \(message, privacy: .public) \(detail, privacy: .private)")
+    logger.log("[Reverb Room] \(message, privacy: .public) \(detail, privacy: .private)")
 }
 
 enum CA {

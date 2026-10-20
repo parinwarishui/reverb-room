@@ -4,21 +4,41 @@
       "type": "swift",
       "request": "launch",
       "args": [],
-      "cwd": "${workspaceFolder:stadiums-self-hosted}",
-      "name": "Debug SSH",
-      "target": "SSH",
+      "cwd": "${workspaceFolder:reverb-room}",
+      "name": "Debug Reverb Room",
+      "target": "ReverbRoom",
       "configuration": "debug",
-      "preLaunchTask": "swift: Build Debug SSH"
+      "preLaunchTask": "swift: Build Debug Reverb Room"
     },
     {
       "type": "swift",
       "request": "launch",
       "args": [],
-      "cwd": "${workspaceFolder:stadiums-self-hosted}",
-      "name": "Release SSH",
-      "target": "SSH",
+      "cwd": "${workspaceFolder:reverb-room}",
+      "name": "Release Reverb Room",
+      "target": "ReverbRoom",
       "configuration": "release",
-      "preLaunchTask": "swift: Build Release SSH"
+      "preLaunchTask": "swift: Build Release Reverb Room"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:reverb-room}",
+      "name": "Debug ReverbRoom",
+      "target": "ReverbRoom",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug ReverbRoom"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:reverb-room}",
+      "name": "Release ReverbRoom",
+      "target": "ReverbRoom",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release ReverbRoom"
     }
   ]
 }

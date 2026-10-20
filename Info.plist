@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>SSH</string>
+    <string>Reverb Room</string>
     <key>CFBundleDisplayName</key>
-    <string>SSH</string>
+    <string>Reverb Room</string>
     <key>CFBundleIdentifier</key>
-    <string>com.yourname.stadiums-self-hosted</string>
+    <string>com.yourname.reverb-room</string>
     <key>CFBundleExecutable</key>
-    <string>SSH</string>
+    <string>ReverbRoom</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -22,11 +22,15 @@
     <true/>
     <!-- Shown in the one-time system audio-capture permission prompt. -->
     <key>NSAudioCaptureUsageDescription</key>
-    <string>SSH captures audio from the app you choose so it can add live reverb.</string>
-    <!-- Fallback only: SSH never records the mic, but some headsets (AirPods)
+    <string>Reverb Room captures audio from the app you choose so it can add live reverb.</string>
+    <!-- Fallback only: Reverb Room never records the mic, but some headsets (AirPods)
          expose a mic on the same device. If macOS counts that as mic use and this key
          is missing, it can terminate the app instead of asking. -->
+    <!-- Shown in the one-time "wants to control Music" prompt. One approval covers
+         reading the track and artwork and the player controls. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Reverb Room reads the current song and its album artwork from Music, and sends play, pause, skip, seek, shuffle and repeat commands when you use its player controls.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>SSH doesn't record your microphone. macOS asks because your headphones' mic is part of the same audio device.</string>
+    <string>Reverb Room doesn't record your microphone. macOS asks because your headphones' mic is part of the same audio device.</string>
 </dict>
 </plist>

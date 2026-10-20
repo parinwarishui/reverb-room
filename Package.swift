@@ -7,7 +7,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "SSH",
+    name: "ReverbRoom",
     platforms: [.macOS("14.2")],
     targets: [
         // C11 atomics for state the real-time audio thread shares with the UI.
@@ -16,9 +16,16 @@ let package = Package(
             path: "Sources/SSHAtomics"
         ),
         .executableTarget(
-            name: "SSH",
+            name: "ReverbRoom",
             dependencies: ["SSHAtomics"],
             path: "Sources/SSH"
+        ),
+        // Pure logic only (palette, loudness tone). Swift Testing; XCTest isn't
+        // part of the Command Line Tools.
+        .testTarget(
+            name: "ReverbRoomTests",
+            dependencies: ["ReverbRoom"],
+            path: "Tests/ReverbRoomTests"
         )
     ]
 )
