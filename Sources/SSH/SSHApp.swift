@@ -8,6 +8,8 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = SSHController()
+    let nowPlaying = MusicNowPlaying()
+    lazy var tank = TankModel(controller: controller, nowPlaying: nowPlaying)
     private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -40,11 +42,17 @@ struct SSHApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Window("SSH", id: "main") {
-            MainWindow(controller: appDelegate.controller)
-                .frame(minWidth: 420, minHeight: 520)
+        Window("Reverb Room", id: "main") {
+            // Resizable down to a minimum: the sidebar keeps a fixed width so
+            // its labels never wrap, and the tank fills the rest (including
+            // full screen).
+            MainWindow(controller: appDelegate.controller,
+                       nowPlaying: appDelegate.nowPlaying,
+                       tank: appDelegate.tank)
+                .frame(minWidth: 976, minHeight: 800)
         }
-        .defaultSize(width: 460, height: 660)
+        .defaultSize(width: 976, height: 800)
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra {
             MenuBarPanel(controller: appDelegate.controller)

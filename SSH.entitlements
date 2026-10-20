@@ -6,8 +6,14 @@
          the mic, but some headsets (AirPods) put a mic on the same audio device and
          macOS can count that as mic use (see NSMicrophoneUsageDescription in
          Info.plist). Actual mic access still needs the user's permission.
-         Nothing else is needed: no DYLD variables, no unsigned libraries. -->
+         No DYLD variables or unsigned libraries are needed. -->
     <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- The hardened runtime also blocks Apple Events unless this is set. Reverb
+         Room sends them to Music only: to read the current track, its artwork and the
+         playhead, and for the player controls (play/pause, skip, seek, shuffle, repeat).
+         The user still has to approve it (NSAppleEventsUsageDescription). -->
+    <key>com.apple.security.automation.apple-events</key>
     <true/>
 </dict>
 </plist>

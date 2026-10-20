@@ -9,7 +9,8 @@
 //    private aggregate device  [clock = your real output device, e.g. AirPods]
 //                        │  IOProc (real-time)
 //                        ▼
-//    AVAudioEngine in manual rendering mode: source ─► reverb ─► peak limiter ─► mixer
+//    AVAudioEngine in manual rendering mode:
+//      source ─► 10-band EQ ─► high-pass ─► low-pass ─► reverb ─► peak limiter ─► mixer
 //                        │
 //                        ▼
 //    aggregate output stream ─► your speakers / AirPods
@@ -20,12 +21,66 @@ import AudioToolbox
 import CoreAudio
 import SSHAtomics
 
-/// What to tap.
-enum TapSpec {
-    /// Only these process objects (one app and its helpers).
-    case processes([AudioObjectID])
-    /// Everything on the system except these process objects (always includes us).
-    case everythingExcept([AudioObjectID])
+/// ISO-standard 10-band graphic EQ center frequencies.
+enum EqualizerBands {
+    static let frequencies: [Float] = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    /// Octaves. Bands are an octave apart, so neighbours overlap and their boosts add up.
+    static let bandwidth: Float = 1.0
+
+    /// The highest point, in dB, of the combined response of all bands. Used as
+    /// an automatic preamp: pulling the EQ's global gain down by this much keeps
+    /// boosts from driving the signal past full scale into the limiter, which is
+    /// what made boosted presets sound rough. Models each band as an RBJ peaking
+    /// biquad, which is close to (if not exactly) what AVAudioUnitEQ uses.
+    static func peakBoost(gains: [Float], sampleRate: Double) -> Float {
+        guard sampleRate > 0, gains.contains(where: { $0 > 0 }) else { return 0 }
+        let nyquist = sampleRate / 2
+        var peak = 0.0
+        // Log-spaced probe frequencies, 20 Hz up to just under Nyquist.
+        let low = log(20.0), high = log(min(20_000, nyquist * 0.95))
+        for step in 0...240 {
+            let f = exp(low + (high - low) * Double(step) / 240)
+            var totalDB = 0.0
+            for (center, gain) in zip(frequencies, gains) where gain != 0 && Double(center) < nyquist {
+                totalDB += peakingResponseDB(at: f, center: Double(center), gainDB: Double(gain),
+                                             octaves: Double(bandwidth), sampleRate: sampleRate)
+            }
+            peak = max(peak, totalDB)
+        }
+        return Float(peak)
+    }
+
+    private static func peakingResponseDB(at f: Double, center: Double, gainDB: Double,
+                                          octaves: Double, sampleRate: Double) -> Double {
+        let a = pow(10, gainDB / 40)
+        let w0 = 2 * Double.pi * center / sampleRate
+        let alpha = sin(w0) * sinh(log(2) / 2 * octaves * w0 / sin(w0))
+        let cosW0 = cos(w0)
+        let (b0, b1, b2) = (1 + alpha * a, -2 * cosW0, 1 - alpha * a)
+        let (a0, a1, a2) = (1 + alpha / a, -2 * cosW0, 1 - alpha / a)
+        // |H(e^jw)| for a biquad, evaluated at w = 2πf/fs.
+        let w = 2 * Double.pi * f / sampleRate
+        let (c1, s1, c2, s2) = (cos(w), sin(w), cos(2 * w), sin(2 * w))
+        let numRe = b0 + b1 * c1 + b2 * c2, numIm = -(b1 * s1 + b2 * s2)
+        let denRe = a0 + a1 * c1 + a2 * c2, denIm = -(a1 * s1 + a2 * s2)
+        let magnitude = sqrt((numRe * numRe + numIm * numIm) / (denRe * denRe + denIm * denIm))
+        return 20 * log10(magnitude)
+    }
+}
+
+/// Initial state for every effect in the chain, applied once at build time.
+/// Later changes go through TapPipeline's individual setters instead.
+struct EffectsSettings {
+    var reverbEnabled: Bool
+    var wetDryMix: Float
+    var preset: AVAudioUnitReverbPreset
+
+    var filterEnabled: Bool
+    var highPassCutoff: Float
+    var lowPassCutoff: Float
+
+    var eqEnabled: Bool
+    var eqGains: [Float]
 }
 
 // MARK: - Real-time shared state
@@ -43,12 +98,24 @@ final class Meter {
     deinit { ssh_meter_destroy(state) }
 
     var peak: Float { ssh_meter_peak(state) }
+    /// Short-term RMS (about 50 ms) of the tapped audio, before any effects. 0...1.
+    var rms: Float { ssh_meter_rms(state) }
+    /// Bass (below ~150 Hz) and treble (above ~5 kHz) levels, as fast-decaying
+    /// peaks so drum hits register. Before any effects. 0...1.
+    var bassRMS: Float { ssh_meter_bass_rms(state) }
+    var trebleRMS: Float { ssh_meter_treble_rms(state) }
     var receivedSignal: Bool { ssh_meter_received_signal(state) }
     var renderFailed: Bool { ssh_meter_render_failed(state) }
 
     func reset() { ssh_meter_reset(state) }
 
-    @inline(__always) func update(cyclePeak: Float) { ssh_meter_update(state, cyclePeak) }
+    @inline(__always) func update(cyclePeak: Float, cycleMeanSquare: Float) {
+        ssh_meter_update(state, cyclePeak)
+        ssh_meter_update_rms(state, cycleMeanSquare)
+    }
+    @inline(__always) func updateBands(bassMeanSquare: Float, trebleMeanSquare: Float) {
+        ssh_meter_update_bands(state, bassMeanSquare, trebleMeanSquare)
+    }
     @inline(__always) func markRenderFailure() { ssh_meter_mark_render_failure(state) }
 }
 
@@ -71,6 +138,7 @@ final class Renderer {
     private let maxFrames: Int
     private let source: SourceContext
     private let meter: Meter
+    private var bands: BandSplitter      // real-time thread only
 
     init?(engine: AVAudioEngine, format: AVAudioFormat, maxFrames: Int, source: SourceContext, meter: Meter) {
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(maxFrames)),
@@ -83,6 +151,7 @@ final class Renderer {
         self.maxFrames = maxFrames
         self.source = source
         self.meter = meter
+        self.bands = BandSplitter(sampleRate: format.sampleRate)
     }
 
     /// Consecutive failed render calls before the health check is told to stop
@@ -159,11 +228,18 @@ final class Renderer {
         let frames = min(inFrames, outFrames)
 
         var peak: Float = 0
-        for i in 0..<(inFrames * tapChannels) {
-            let a = abs(tapSamples[i])
+        var sumOfSquares: Float = 0
+        let sampleCount = inFrames * tapChannels
+        for i in 0..<sampleCount {
+            let s = tapSamples[i]
+            let a = abs(s)
             if a > peak { peak = a }
+            sumOfSquares += s * s
         }
-        meter.update(cyclePeak: peak)
+        meter.update(cyclePeak: peak,
+                     cycleMeanSquare: sampleCount > 0 ? sumOfSquares / Float(sampleCount) : 0)
+        let bandLevels = bands.meanSquares(tapSamples, frameCount: inFrames, channels: tapChannels)
+        meter.updateBands(bassMeanSquare: bandLevels.bass, trebleMeanSquare: bandLevels.treble)
 
         let rendered = UnsafeMutableAudioBufferListPointer(renderABL)
         var done = 0
@@ -212,7 +288,6 @@ final class Renderer {
 enum PipelineError: LocalizedError {
     case sourceNotRunning(String)
     case sourceHasNoAudio(String)
-    case cannotExcludeSelf
     case noOutputDevice
     case tapFailed(OSStatus)
     case unsupportedTapFormat(String)
@@ -227,7 +302,6 @@ enum PipelineError: LocalizedError {
         switch self {
         case .sourceNotRunning(let name): return "Open \(name) first."
         case .sourceHasNoAudio(let name): return "Press play in \(name), then turn reverb on. (An app only becomes tappable after it has produced some audio.)"
-        case .cannotExcludeSelf: return "Couldn't identify SSH's own audio process, so a system-wide tap would feed back into itself. Pick a specific app instead."
         case .noOutputDevice: return "No output device found."
         case .tapFailed(let s): return "Couldn't create the audio tap (OSStatus \(s))."
         case .unsupportedTapFormat(let d): return "Unexpected tap audio format: \(d)"
@@ -245,7 +319,6 @@ enum PipelineError: LocalizedError {
         switch self {
         case .sourceNotRunning: return "sourceNotRunning"
         case .sourceHasNoAudio: return "sourceHasNoAudio"
-        case .cannotExcludeSelf: return "cannotExcludeSelf"
         case .noOutputDevice: return "noOutputDevice"
         case .tapFailed(let s): return "tapFailed(\(s))"
         case .unsupportedTapFormat(let d): return "unsupportedTapFormat(\(d))"
@@ -271,6 +344,19 @@ final class TapPipeline {
     private var engine: AVAudioEngine?
     private var renderer: Renderer?
     private let reverb = AVAudioUnitReverb()
+    private let equalizer = AVAudioUnitEQ(numberOfBands: EqualizerBands.frequencies.count)
+    private let highPass = AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
+        componentType: kAudioUnitType_Effect,
+        componentSubType: kAudioUnitSubType_HighPassFilter,
+        componentManufacturer: kAudioUnitManufacturer_Apple,
+        componentFlags: 0,
+        componentFlagsMask: 0))
+    private let lowPass = AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
+        componentType: kAudioUnitType_Effect,
+        componentSubType: kAudioUnitSubType_LowPassFilter,
+        componentManufacturer: kAudioUnitManufacturer_Apple,
+        componentFlags: 0,
+        componentFlagsMask: 0))
     private let meter: Meter
     private let ioQueue = DispatchQueue(label: "SSH.io", qos: .userInteractive)
     private let listenerQueue = DispatchQueue(label: "SSH.listener")
@@ -291,16 +377,50 @@ final class TapPipeline {
 
     deinit { teardown() }
 
+    // All setters below run on the work queue while the IO thread renders. Setting
+    // an Audio Unit property or parameter from outside the render thread is the
+    // standard host pattern (the AU synchronizes internally); none of these units
+    // have a real-time-safe alternative.
+
     func setWetDryMix(_ value: Float) { reverb.wetDryMix = value }
-    /// Runs on the work queue while the IO thread renders. Setting an Audio Unit
-    /// property from outside the render thread is the standard host pattern (the AU
-    /// synchronizes internally); AVAudioUnitReverb has no real-time-safe alternative.
     func setPreset(_ preset: AVAudioUnitReverbPreset) { reverb.loadFactoryPreset(preset) }
+    func setReverbEnabled(_ enabled: Bool) { setBypass(!enabled, on: reverb) }
+
+    func setHighPassCutoff(_ value: Float) {
+        setAUParam(kHipassParam_CutoffFrequency, on: highPass, value: value)
+    }
+    func setLowPassCutoff(_ value: Float) {
+        setAUParam(kLowPassParam_CutoffFrequency, on: lowPass, value: value)
+    }
+    func setFilterEnabled(_ enabled: Bool) {
+        setBypass(!enabled, on: highPass)
+        setBypass(!enabled, on: lowPass)
+    }
+
+    func setEQGains(_ gains: [Float]) {
+        for (i, gain) in gains.enumerated() where i < equalizer.bands.count {
+            equalizer.bands[i].gain = gain
+        }
+        equalizer.globalGain = -EqualizerBands.peakBoost(gains: gains, sampleRate: sampleRate)
+    }
+    func setEQEnabled(_ enabled: Bool) { setBypass(!enabled, on: equalizer) }
+
+    private func setAUParam(_ param: AudioUnitParameterID, on unit: AVAudioUnit, value: Float) {
+        AudioUnitSetParameter(unit.audioUnit, param, kAudioUnitScope_Global, 0, value, 0)
+    }
+
+    /// Soft on/off for an AU node without touching the engine's graph while it's
+    /// rendering in real time.
+    private func setBypass(_ bypass: Bool, on unit: AVAudioUnit) {
+        var flag: UInt32 = bypass ? 1 : 0
+        AudioUnitSetProperty(unit.audioUnit, kAudioUnitProperty_BypassEffect,
+                             kAudioUnitScope_Global, 0, &flag, UInt32(MemoryLayout<UInt32>.size))
+    }
 
     /// Builds everything. The source is only muted at the very last step
     /// (AudioDeviceStart), so any earlier failure leaves it playing normally.
     /// Caller must call teardown() if this throws.
-    func start(spec: TapSpec, wetDryMix: Float, preset: AVAudioUnitReverbPreset) throws {
+    func start(processes: [AudioObjectID], settings: EffectsSettings) throws {
         guard let output = CA.defaultOutputDevice(),
               let outputUID = CA.string(output, kAudioDevicePropertyDeviceUID) else {
             throw PipelineError.noOutputDevice
@@ -311,15 +431,8 @@ final class TapPipeline {
         dlog("Output (bluetooth=\(bluetooth)):", private: "\(outputName) [\(outputUID)]")
 
         // 1. Process tap. Muting only kicks in once the tap is actually being read.
-        let tapDescription: CATapDescription
-        switch spec {
-        case .processes(let objects):
-            dlog("Tapping process objects \(objects)")
-            tapDescription = CATapDescription(stereoMixdownOfProcesses: objects)
-        case .everythingExcept(let excluded):
-            dlog("Tapping everything except \(excluded)")
-            tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
-        }
+        dlog("Tapping process objects \(processes)")
+        let tapDescription = CATapDescription(stereoMixdownOfProcesses: processes)
         tapDescription.uuid = UUID()
         tapDescription.muteBehavior = .mutedWhenTapped
         var newTap = CA.unknown
@@ -340,8 +453,8 @@ final class TapPipeline {
         // Drift compensation OFF for Bluetooth — tap and output share the BT clock,
         // and turning it on causes periodic crackle (per FineTune's findings).
         let description: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "SSH",
-            kAudioAggregateDeviceUIDKey: "SSH-\(UUID().uuidString)",
+            kAudioAggregateDeviceNameKey: "Reverb Room",
+            kAudioAggregateDeviceUIDKey: "ReverbRoom-\(UUID().uuidString)",
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceClockDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
@@ -374,9 +487,9 @@ final class TapPipeline {
         sampleRate = CA.nominalSampleRate(aggregateID) ?? CA.nominalSampleRate(output) ?? 48_000
         dlog("Running at \(sampleRate) Hz")
 
-        // 3. Reverb engine in manual rendering mode — never touches hardware itself,
+        // 3. Effects engine in manual rendering mode — never touches hardware itself,
         // and we never access engine.inputNode, so it can't open a microphone.
-        try buildEngine(wetDryMix: wetDryMix, preset: preset)
+        try buildEngine(settings: settings)
 
         // 4. IOProc on the aggregate.
         guard let renderer else { throw PipelineError.engineFailed("renderer missing") }
@@ -399,7 +512,7 @@ final class TapPipeline {
         dlog("Pipeline running")
     }
 
-    private func buildEngine(wetDryMix: Float, preset: AVAudioUnitReverbPreset) throws {
+    private func buildEngine(settings: EffectsSettings) throws {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
             throw PipelineError.engineFailed("couldn't create format")
         }
@@ -452,12 +565,40 @@ final class TapPipeline {
             componentFlagsMask: 0))
 
         engine.attach(sourceNode)
+        engine.attach(equalizer)
+        engine.attach(highPass)
+        engine.attach(lowPass)
         engine.attach(reverb)
         engine.attach(limiter)
-        reverb.loadFactoryPreset(preset)
-        reverb.wetDryMix = wetDryMix
 
-        engine.connect(sourceNode, to: reverb, format: format)
+        reverb.loadFactoryPreset(settings.preset)
+        reverb.wetDryMix = settings.wetDryMix
+        setBypass(!settings.reverbEnabled, on: reverb)
+
+        setAUParam(kHipassParam_CutoffFrequency, on: highPass, value: settings.highPassCutoff)
+        setAUParam(kLowPassParam_CutoffFrequency, on: lowPass, value: settings.lowPassCutoff)
+        setBypass(!settings.filterEnabled, on: highPass)
+        setBypass(!settings.filterEnabled, on: lowPass)
+
+        for (i, frequency) in EqualizerBands.frequencies.enumerated() {
+            let band = equalizer.bands[i]
+            band.filterType = .parametric
+            band.frequency = frequency
+            band.bandwidth = EqualizerBands.bandwidth
+            band.bypass = false
+        }
+        setEQGains(settings.eqGains)
+        setBypass(!settings.eqEnabled, on: equalizer)
+
+        // Apple's default 24 ms decay is shorter than one cycle of a 31 Hz bass
+        // note, so whenever the limiter engaged it changed gain inside each bass
+        // cycle and audibly distorted it. Use the slowest decay the unit allows.
+        setAUParam(kLimiterParam_DecayTime, on: limiter, value: 0.06)
+
+        engine.connect(sourceNode, to: equalizer, format: format)
+        engine.connect(equalizer, to: highPass, format: format)
+        engine.connect(highPass, to: lowPass, format: format)
+        engine.connect(lowPass, to: reverb, format: format)
         engine.connect(reverb, to: limiter, format: format)
         engine.connect(limiter, to: engine.mainMixerNode, format: format)
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: format)
